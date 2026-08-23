@@ -1,0 +1,343 @@
+Installing Helm
+Lab Objectives
+By the end of this lab, you will be able to:
+
+Understand what Helm is and its role in Kubernetes package management
+Install Helm on a Linux system
+Configure Helm to work with a Kubernetes cluster
+Verify Helm installation and functionality
+Use basic Helm commands to interact with Kubernetes
+Prerequisites
+Before starting this lab, you should have:
+
+Basic understanding of Linux command line operations
+Fundamental knowledge of Kubernetes concepts (pods, services, deployments)
+Familiarity with YAML file structure
+Basic understanding of package managers
+Lab Environment
+Al Nafi provides Linux-based cloud machines for this lab. Simply click Start Lab to access your dedicated Linux machine. The provided Linux machine is bare metal with no pre-installed tools, so you will need to install all required tools during this lab exercise.
+
+What is Helm?
+Helm is the package manager for Kubernetes, often referred to as the "apt/yum for Kubernetes." It helps you manage Kubernetes applications through Helm Charts, which are collections of files that describe a related set of Kubernetes resources.
+
+Task 1: Setting Up the Environment
+Subtask 1.1: Update System Packages
+First, let's ensure our system is up to date:
+
+sudo apt update && sudo apt upgrade -y
+Subtask 1.2: Install Required Dependencies
+Install curl and other essential tools:
+
+sudo apt install -y curl wget apt-transport-https ca-certificates gnupg lsb-release
+Subtask 1.3: Install Docker
+Since we need Kubernetes, let's install Docker first:
+
+# Add Docker's official GPG key
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+
+# Add Docker repository
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# Update package index
+sudo apt update
+
+# Install Docker
+sudo apt install -y docker-ce docker-ce-cli containerd.io
+
+# Add current user to docker group
+sudo usermod -aG docker $USER
+
+# Start and enable Docker
+sudo systemctl start docker
+sudo systemctl enable docker
+Log out and log back in, or run:
+
+newgrp docker
+Verify Docker installation:
+
+docker --version
+Subtask 1.4: Install kubectl
+Install the Kubernetes command-line tool:
+
+# Download kubectl
+curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+
+# Make it executable
+chmod +x kubectl
+
+# Move to system path
+sudo mv kubectl /usr/local/bin/
+
+# Verify installation
+kubectl version --client
+Subtask 1.5: Install Minikube
+For this lab, we'll use Minikube to create a local Kubernetes cluster:
+
+# Download Minikube
+curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
+
+# Make it executable
+chmod +x minikube-linux-amd64
+
+# Move to system path
+sudo mv minikube-linux-amd64 /usr/local/bin/minikube
+
+# Verify installation
+minikube version
+Subtask 1.6: Start Kubernetes Cluster
+Start a local Kubernetes cluster using Minikube:
+
+# Start Minikube with Docker driver
+minikube start --driver=docker
+
+# Verify cluster is running
+kubectl cluster-info
+
+# Check nodes
+kubectl get nodes
+Task 2: Installing Helm
+Subtask 2.1: Download and Install Helm
+There are multiple ways to install Helm. We'll use the official installation script:
+
+# Download and run the Helm installation script
+curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+Alternative manual installation method:
+
+# Download the latest Helm release
+wget https://get.helm.sh/helm-v3.13.0-linux-amd64.tar.gz
+
+# Extract the archive
+tar -zxvf helm-v3.13.0-linux-amd64.tar.gz
+
+# Move helm binary to system path
+sudo mv linux-amd64/helm /usr/local/bin/helm
+
+# Clean up
+rm -rf linux-amd64 helm-v3.13.0-linux-amd64.tar.gz
+Subtask 2.2: Verify Helm Installation
+Check if Helm is installed correctly:
+
+# Check Helm version
+helm version
+
+# Check Helm help
+helm help
+You should see output similar to:
+
+version.BuildInfo{Version:"v3.13.0", GitCommit:"825e86f6a7a38cef1112bfa606e4127a706749b1", GitTreeState:"clean", GoVersion:"go1.20.8"}
+Task 3: Configuring Helm with Kubernetes
+Subtask 3.1: Verify Kubernetes Connection
+Ensure Helm can communicate with your Kubernetes cluster:
+
+# Check current Kubernetes context
+kubectl config current-context
+
+# Verify Helm can connect to Kubernetes
+helm list
+The helm list command should run without errors, even if it returns an empty list.
+
+Subtask 3.2: Add Helm Repositories
+Helm uses repositories to store charts. Let's add some popular repositories:
+
+# Add the official Helm stable repository
+helm repo add stable https://charts.helm.sh/stable
+
+# Add Bitnami repository (popular for applications)
+helm repo add bitnami https://charts.bitnami.com/bitnami
+
+# Update repository information
+helm repo update
+
+# List added repositories
+helm repo list
+Subtask 3.3: Search for Available Charts
+Let's explore what charts are available:
+
+# Search for nginx charts
+helm search repo nginx
+
+# Search for all charts in bitnami repository
+helm search repo bitnami
+
+# Get more detailed information about a specific chart
+helm show chart bitnami/nginx
+Task 4: Testing Helm Installation
+Subtask 4.1: Install a Test Application
+Let's install a simple nginx application to test our Helm setup:
+
+# Install nginx using Helm
+helm install my-nginx bitnami/nginx
+
+# Check the installation status
+helm status my-nginx
+
+# List all Helm releases
+helm list
+Subtask 4.2: Verify the Deployment
+Check if the application was deployed successfully:
+
+# Check pods
+kubectl get pods
+
+# Check services
+kubectl get services
+
+# Get detailed information about the nginx service
+kubectl describe service my-nginx
+Subtask 4.3: Access the Application
+Since we're using Minikube, let's access the nginx service:
+
+# Get the service URL
+minikube service my-nginx --url
+Open another terminal and test the connection:
+
+# Test the nginx service (replace URL with the one from previous command)
+curl $(minikube service my-nginx --url)
+You should see the nginx welcome page HTML.
+
+Subtask 4.4: Explore Helm Commands
+Let's explore some useful Helm commands:
+
+# Get release history
+helm history my-nginx
+
+# Get release values
+helm get values my-nginx
+
+# Get all information about the release
+helm get all my-nginx
+
+# Show the chart information
+helm show chart bitnami/nginx
+
+# Show the chart values
+helm show values bitnami/nginx
+Subtask 4.5: Upgrade and Rollback
+Let's practice upgrading and rolling back releases:
+
+# Upgrade the release with custom values
+helm upgrade my-nginx bitnami/nginx --set service.type=NodePort
+
+# Check the upgrade
+helm history my-nginx
+
+# Rollback to previous version
+helm rollback my-nginx 1
+
+# Verify rollback
+helm history my-nginx
+Subtask 4.6: Clean Up
+Remove the test application:
+
+# Uninstall the release
+helm uninstall my-nginx
+
+# Verify removal
+helm list
+kubectl get pods
+Task 5: Advanced Helm Configuration
+Subtask 5.1: Create a Custom Values File
+Create a custom values file for more complex configurations:
+
+# Create a custom values file
+cat > custom-nginx-values.yaml << EOF
+replicaCount: 2
+
+service:
+  type: NodePort
+  port: 80
+
+resources:
+  limits:
+    cpu: 100m
+    memory: 128Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+ingress:
+  enabled: false
+EOF
+Subtask 5.2: Install with Custom Values
+Install nginx using the custom values file:
+
+# Install with custom values
+helm install custom-nginx bitnami/nginx -f custom-nginx-values.yaml
+
+# Verify the installation
+kubectl get pods
+kubectl get services
+Subtask 5.3: Template Rendering
+See what Kubernetes manifests Helm would generate:
+
+# Render templates without installing
+helm template custom-nginx bitnami/nginx -f custom-nginx-values.yaml
+
+# Save rendered templates to a file
+helm template custom-nginx bitnami/nginx -f custom-nginx-values.yaml > rendered-manifests.yaml
+
+# View the file
+cat rendered-manifests.yaml
+Troubleshooting Common Issues
+Issue 1: Permission Denied Errors
+If you encounter permission errors with Docker:
+
+# Add user to docker group and refresh
+sudo usermod -aG docker $USER
+newgrp docker
+Issue 2: Minikube Won't Start
+If Minikube fails to start:
+
+# Delete existing cluster and restart
+minikube delete
+minikube start --driver=docker --force
+Issue 3: Helm Repository Errors
+If repository operations fail:
+
+# Remove and re-add repositories
+helm repo remove stable
+helm repo remove bitnami
+helm repo add stable https://charts.helm.sh/stable
+helm repo add bitnami https://charts.bitnami.com/bitnami
+helm repo update
+Issue 4: kubectl Connection Issues
+If kubectl cannot connect to the cluster:
+
+# Reset kubectl context
+minikube update-context
+kubectl config current-context
+Verification Checklist
+Before completing this lab, ensure you can:
+
+ Run helm version successfully
+ List Helm repositories with helm repo list
+ Search for charts with helm search repo
+ Install a chart with helm install
+ List installed releases with helm list
+ Uninstall a release with helm uninstall
+ Access the Kubernetes cluster with kubectl
+Lab Cleanup
+Clean up the resources created during this lab:
+
+# Uninstall any remaining Helm releases
+helm uninstall custom-nginx
+
+# Stop Minikube
+minikube stop
+
+# Remove custom files
+rm -f custom-nginx-values.yaml rendered-manifests.yaml
+Conclusion
+Congratulations! You have successfully completed Lab 1: Installing Helm. In this lab, you have:
+
+Set up a complete Kubernetes environment using Minikube
+Installed and configured Helm 3 on your Linux system
+Connected Helm to your Kubernetes cluster
+Added and managed Helm repositories
+Deployed applications using Helm charts
+Learned essential Helm commands for managing releases
+Created custom configuration files for Helm deployments
+Practiced upgrading and rolling back Helm releases
+Why This Matters: Helm is an essential tool for managing Kubernetes applications in production environments. It simplifies the deployment, upgrade, and management of complex applications by packaging them into reusable charts. The skills you've learned in this lab form the foundation for advanced Kubernetes application management, making it easier to deploy and maintain applications at scale.
+
+Next Steps: With Helm installed and configured, you're now ready to explore more advanced topics such as creating custom Helm charts, managing dependencies, and implementing CI/CD pipelines with Helm. These skills are crucial for modern DevOps practices and container orchestration workflows.
