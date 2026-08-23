@@ -1,0 +1,48 @@
+# Custom NGINX configuration
+replicaCount: 3
+
+image:
+  tag: "1.25.3"
+
+service:
+  type: NodePort
+  nodePorts:
+    http: 30080
+
+resources:
+  limits:
+    cpu: 200m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+ingress:
+  enabled: false
+
+# Custom index.html content
+staticSiteConfigmap: |-
+  <!DOCTYPE html>
+  <html>
+  <head>
+      <title>Custom NGINX - Helm Lab</title>
+      <style>
+          body { font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }
+          h1 { color: #2E8B57; }
+          p { color: #666; }
+      </style>
+  </head>
+  <body>
+      <h1>Welcome to Custom NGINX Deployment</h1>
+      <p>This NGINX server was deployed using Helm with custom values!</p>
+      <p>Lab 5: Deploying Kubernetes Apps with Helm</p>
+  </body>
+  </html>
+
+# Pod security context
+podSecurityContext:
+  fsGroup: 1001
+
+containerSecurityContext:
+  runAsUser: 1001
+  runAsNonRoot: true
