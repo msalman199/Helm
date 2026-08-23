@@ -1,0 +1,603 @@
+Helm Dependencies
+Lab Objectives
+By the end of this lab, you will be able to:
+
+Understand the concept of Helm chart dependencies
+Add dependencies to a Helm chart using the Chart.yaml file
+Configure dependency repositories and versions
+Install and manage dependent charts together as a single deployment
+Update and manage chart dependencies effectively
+Troubleshoot common dependency-related issues
+Prerequisites
+Before starting this lab, you should have:
+
+Basic understanding of Kubernetes concepts (pods, services, deployments)
+Familiarity with YAML file structure
+Basic command-line interface experience
+Understanding of Helm basics from previous labs
+Knowledge of how to create and structure Helm charts
+Lab Environment
+Al Nafi provides Linux-based cloud machines for this lab. Simply click Start Lab to access your dedicated Linux machine. The provided machine is bare metal with no pre-installed tools, so you will install all required tools during the lab exercises.
+
+Task 1: Environment Setup and Tool Installation
+Subtask 1.1: Install Required Tools
+First, let's install all the necessary tools on your Linux machine.
+
+Step 1: Update the system package manager
+
+sudo apt update && sudo apt upgrade -y
+Step 2: Install curl and other essential tools
+
+sudo apt install -y curl wget apt-transport-https ca-certificates gnupg lsb-release
+Step 3: Install Docker (required for Kubernetes)
+
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io
+
+sudo usermod -aG docker $USER
+newgrp docker
+Step 4: Install kubectl
+
+curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+Step 5: Install Helm
+
+curl https://baltocdn.com/helm/signing.asc | gpg --dearmor | sudo tee /usr/share/keyrings/helm.gpg > /dev/null
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/helm.gpg] https://baltocdn.com/helm/stable/debian/ all main" | sudo tee /etc/apt/sources.list.d/helm-stable-debian.list
+sudo apt update
+sudo apt install -y helm
+Step 6: Install and start Minikube
+
+curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
+sudo install minikube-linux-amd64 /usr/local/bin/minikube
+
+minikube start --driver=docker
+Subtask 1.2: Verify Installation
+Step 1: Verify all tools are installed correctly
+
+docker --version
+kubectl version --client
+helm version
+minikube status
+Step 2: Configure kubectl to use minikube context
+
+kubectl config use-context minikube
+kubectl get nodes
+Task 2: Add Dependencies to a Helm Chart
+Subtask 2.1: Create a Parent Chart
+Step 1: Create a new directory for our lab work
+
+mkdir -p ~/helm-dependencies-lab
+cd ~/helm-dependencies-lab
+Step 2: Create a new Helm chart that will serve as our parent chart
+
+helm create webapp-with-deps
+cd webapp-with-deps
+Step 3: Examine the default chart structure
+
+tree .
+Subtask 2.2: Understanding Chart Dependencies
+Dependencies in Helm allow you to include other charts as components of your chart. This is useful when your application requires multiple services like databases, caches, or monitoring tools.
+
+Step 1: View the current Chart.yaml file
+
+cat Chart.yaml
+Step 2: Create a backup of the original Chart.yaml
+
+cp Chart.yaml Chart.yaml.backup
+Subtask 2.3: Add Dependencies to Chart.yaml
+Step 1: Edit the Chart.yaml file to add dependencies
+
+cat > Chart.yaml << 'EOF'
+apiVersion: v2
+name: webapp-with-deps
+description: A Helm chart for a web application with dependencies
+type: application
+version: 0.1.0
+appVersion: "1.0"
+
+dependencies:
+  - name: redis
+    version: "17.15.6"
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: redis.enabled
+  - name: postgresql
+    version: "12.12.10"
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: postgresql.enabled
+  - name: nginx
+    version: "15.4.4"
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: nginx.enabled
+EOF
+Step 2: Create a values.yaml file to control dependency enablement
+
+cat > values.yaml << 'EOF'
+# Default values for webapp-with-deps
+replicaCount: 1
+
+image:
+  repository: nginx
+  pullPolicy: IfNotPresent
+  tag: "1.21"
+
+service:
+  type: ClusterIP
+  port: 80
+
+# Dependency configurations
+redis:
+  enabled: true
+  auth:
+    enabled: false
+  master:
+    persistence:
+      enabled: false
+
+postgresql:
+  enabled: true
+  auth:
+    postgresPassword: "mypassword"
+    database: "webapp"
+  primary:
+    persistence:
+      enabled: false
+
+nginx:
+  enabled: false
+  service:
+    type: ClusterIP
+EOF
+Subtask 2.4: Update Dependencies
+Step 1: Add the Bitnami repository to Helm
+
+helm repo add bitnami https://charts.bitnami.com/bitnami
+helm repo update
+Step 2: Download the dependencies
+
+helm dependency update
+Step 3: Verify that dependencies were downloaded
+
+ls -la charts/
+cat Chart.lock
+The Chart.lock file contains the exact versions of dependencies that were downloaded, ensuring reproducible builds.
+
+Subtask 2.5: Examine Dependency Structure
+Step 1: Extract and examine one of the dependency charts
+
+cd charts
+tar -tf redis-17.15.6.tgz | head -20
+Step 2: Return to the main chart directory
+
+cd ..
+Task 3: Install Dependent Charts Together
+Subtask 3.1: Create a Custom Template
+Step 1: Modify the main deployment template to connect with dependencies
+
+cat > templates/deployment.yaml << 'EOF'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "webapp-with-deps.fullname" . }}
+  labels:
+    {{- include "webapp-with-deps.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "webapp-with-deps.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "webapp-with-deps.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+          env:
+            {{- if .Values.redis.enabled }}
+            - name: REDIS_HOST
+              value: "{{ include "webapp-with-deps.fullname" . }}-redis-master"
+            - name: REDIS_PORT
+              value: "6379"
+            {{- end }}
+            {{- if .Values.postgresql.enabled }}
+            - name: POSTGRES_HOST
+              value: "{{ include "webapp-with-deps.fullname" . }}-postgresql"
+            - name: POSTGRES_PORT
+              value: "5432"
+            - name: POSTGRES_DB
+              value: "{{ .Values.postgresql.auth.database }}"
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+EOF
+Subtask 3.2: Install the Chart with Dependencies
+Step 1: Create a namespace for our application
+
+kubectl create namespace webapp-demo
+Step 2: Install the chart with all dependencies
+
+helm install my-webapp . --namespace webapp-demo
+Step 3: Check the installation status
+
+helm status my-webapp --namespace webapp-demo
+Subtask 3.3: Verify Dependent Services
+Step 1: List all pods in the namespace
+
+kubectl get pods -n webapp-demo
+Step 2: List all services created
+
+kubectl get services -n webapp-demo
+Step 3: Check the deployments
+
+kubectl get deployments -n webapp-demo
+Step 4: Verify that Redis is running and accessible
+
+kubectl exec -n webapp-demo deployment/my-webapp-redis-master -- redis-cli ping
+Step 5: Verify PostgreSQL is running
+
+kubectl exec -n webapp-demo deployment/my-webapp-postgresql -- pg_isready
+Subtask 3.4: Test Dependency Configuration
+Step 1: Create a test pod to verify connectivity
+
+cat > test-connectivity.yaml << 'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-connectivity
+  namespace: webapp-demo
+spec:
+  containers:
+  - name: test
+    image: busybox
+    command: ['sleep', '3600']
+EOF
+
+kubectl apply -f test-connectivity.yaml
+Step 2: Test Redis connectivity
+
+kubectl exec -n webapp-demo test-connectivity -- nslookup my-webapp-redis-master
+Step 3: Test PostgreSQL connectivity
+
+kubectl exec -n webapp-demo test-connectivity -- nslookup my-webapp-postgresql
+Subtask 3.5: Manage Dependencies Selectively
+Step 1: Create a custom values file to disable Redis
+
+cat > custom-values.yaml << 'EOF'
+redis:
+  enabled: false
+
+postgresql:
+  enabled: true
+  auth:
+    postgresPassword: "mypassword"
+    database: "webapp"
+  primary:
+    persistence:
+      enabled: false
+
+nginx:
+  enabled: true
+  service:
+    type: ClusterIP
+EOF
+Step 2: Upgrade the release with new values
+
+helm upgrade my-webapp . --namespace webapp-demo -f custom-values.yaml
+Step 3: Verify the changes
+
+kubectl get pods -n webapp-demo
+helm get values my-webapp --namespace webapp-demo
+Subtask 3.6: Working with Dependency Aliases
+Step 1: Modify Chart.yaml to use aliases for multiple instances
+
+cat > Chart.yaml << 'EOF'
+apiVersion: v2
+name: webapp-with-deps
+description: A Helm chart for a web application with dependencies
+type: application
+version: 0.1.0
+appVersion: "1.0"
+
+dependencies:
+  - name: redis
+    version: "17.15.6"
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: redis.enabled
+    alias: cache
+  - name: redis
+    version: "17.15.6"
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: session-store.enabled
+    alias: session-store
+  - name: postgresql
+    version: "12.12.10"
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: postgresql.enabled
+EOF
+Step 2: Update values.yaml for aliases
+
+cat > values.yaml << 'EOF'
+replicaCount: 1
+
+image:
+  repository: nginx
+  pullPolicy: IfNotPresent
+  tag: "1.21"
+
+service:
+  type: ClusterIP
+  port: 80
+
+# Cache Redis instance
+cache:
+  enabled: true
+  auth:
+    enabled: false
+  master:
+    persistence:
+      enabled: false
+
+# Session store Redis instance
+session-store:
+  enabled: true
+  auth:
+    enabled: false
+  master:
+    persistence:
+      enabled: false
+    service:
+      ports:
+        redis: 6380
+
+postgresql:
+  enabled: true
+  auth:
+    postgresPassword: "mypassword"
+    database: "webapp"
+  primary:
+    persistence:
+      enabled: false
+EOF
+Step 3: Update dependencies and install
+
+helm dependency update
+helm upgrade my-webapp . --namespace webapp-demo
+Task 4: Advanced Dependency Management
+Subtask 4.1: Dependency Conditions and Tags
+Step 1: Create a more complex Chart.yaml with tags
+
+cat > Chart.yaml << 'EOF'
+apiVersion: v2
+name: webapp-with-deps
+description: A Helm chart for a web application with dependencies
+type: application
+version: 0.1.0
+appVersion: "1.0"
+
+dependencies:
+  - name: redis
+    version: "17.15.6"
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: redis.enabled
+    tags:
+      - cache
+      - database
+  - name: postgresql
+    version: "12.12.10"
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: postgresql.enabled
+    tags:
+      - database
+      - persistent
+  - name: nginx
+    version: "15.4.4"
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: nginx.enabled
+    tags:
+      - frontend
+EOF
+Step 2: Create values.yaml with tag controls
+
+cat > values.yaml << 'EOF'
+# Tag-based enabling/disabling
+tags:
+  database: true
+  cache: false
+  frontend: false
+  persistent: true
+
+# Individual service configurations
+redis:
+  enabled: true
+  auth:
+    enabled: false
+  master:
+    persistence:
+      enabled: false
+
+postgresql:
+  enabled: true
+  auth:
+    postgresPassword: "mypassword"
+    database: "webapp"
+  primary:
+    persistence:
+      enabled: false
+
+nginx:
+  enabled: false
+EOF
+Subtask 4.2: Dependency Import Values
+Step 1: Create a Chart.yaml with import-values
+
+cat > Chart.yaml << 'EOF'
+apiVersion: v2
+name: webapp-with-deps
+description: A Helm chart for a web application with dependencies
+type: application
+version: 0.1.0
+appVersion: "1.0"
+
+dependencies:
+  - name: postgresql
+    version: "12.12.10"
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: postgresql.enabled
+    import-values:
+      - child: auth.postgresPassword
+        parent: database.password
+      - child: auth.database
+        parent: database.name
+EOF
+Step 2: Update dependencies and test
+
+helm dependency update
+helm template my-webapp . --debug
+Subtask 4.3: Troubleshooting Dependencies
+Step 1: Check for dependency issues
+
+helm dependency list
+helm dependency build --verify
+Step 2: Debug template rendering with dependencies
+
+helm template my-webapp . --debug --namespace webapp-demo
+Step 3: Check for circular dependencies
+
+helm lint .
+Subtask 4.4: Clean Up and Reinstall
+Step 1: Uninstall the current release
+
+helm uninstall my-webapp --namespace webapp-demo
+Step 2: Clean up the charts directory
+
+rm -rf charts/*
+rm Chart.lock
+Step 3: Reinstall with final configuration
+
+cat > Chart.yaml << 'EOF'
+apiVersion: v2
+name: webapp-with-deps
+description: A Helm chart for a web application with dependencies
+type: application
+version: 0.1.0
+appVersion: "1.0"
+
+dependencies:
+  - name: redis
+    version: "17.15.6"
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: redis.enabled
+  - name: postgresql
+    version: "12.12.10"
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: postgresql.enabled
+EOF
+
+cat > values.yaml << 'EOF'
+replicaCount: 1
+
+image:
+  repository: nginx
+  pullPolicy: IfNotPresent
+  tag: "1.21"
+
+service:
+  type: ClusterIP
+  port: 80
+
+redis:
+  enabled: true
+  auth:
+    enabled: false
+  master:
+    persistence:
+      enabled: false
+
+postgresql:
+  enabled: true
+  auth:
+    postgresPassword: "mypassword"
+    database: "webapp"
+  primary:
+    persistence:
+      enabled: false
+EOF
+
+helm dependency update
+helm install my-webapp . --namespace webapp-demo
+Step 4: Verify final installation
+
+kubectl get all -n webapp-demo
+helm list --namespace webapp-demo
+Troubleshooting Common Issues
+Issue 1: Dependency Download Failures
+If dependencies fail to download:
+
+# Clear Helm cache
+rm -rf ~/.cache/helm/repository/*
+
+# Re-add repositories
+helm repo add bitnami https://charts.bitnami.com/bitnami
+helm repo update
+
+# Try dependency update again
+helm dependency update
+Issue 2: Version Conflicts
+If you encounter version conflicts:
+
+# Check available versions
+helm search repo bitnami/redis --versions
+
+# Update Chart.yaml with compatible versions
+# Then run dependency update
+helm dependency update
+Issue 3: Template Rendering Issues
+If templates fail to render:
+
+# Debug template rendering
+helm template . --debug
+
+# Check for syntax errors
+helm lint .
+
+# Verify values are correctly passed
+helm template . --set redis.enabled=false --debug
+Lab Summary
+In this comprehensive lab, you have successfully:
+
+Set up a complete Helm development environment on a single Linux machine with Kubernetes, Docker, and Helm
+Created and configured chart dependencies using the Chart.yaml file with proper version specifications
+Managed dependency repositories by adding external chart repositories and updating dependency lists
+Installed complex applications with multiple dependent services working together
+Controlled dependency behavior using conditions, tags, and custom values
+Implemented advanced dependency features like aliases and import-values
+Troubleshot common dependency issues and learned debugging techniques
+Why This Matters:
+
+Helm dependencies are crucial for modern application deployment because they allow you to:
+
+Compose complex applications from reusable components
+Manage service relationships effectively in microservices architectures
+Maintain consistency across different environments
+Simplify deployment processes by bundling related services
+Enable selective deployment of application components based on requirements
+Understanding Helm dependencies prepares you for real-world scenarios where applications require databases, caches, monitoring tools, and other supporting services. This knowledge is essential for DevOps engineers, Kubernetes administrators, and anyone working with containerized applications in production environments.
+
+The skills you've learned in this lab form the foundation for managing complex, multi-service applications in Kubernetes using Helm's powerful dependency management system.
