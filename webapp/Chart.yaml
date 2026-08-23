@@ -1,0 +1,13 @@
+apiVersion: v2
+name: webapp
+description: A custom web application Helm chart
+type: application
+version: 0.2.0
+appVersion: "2.0"
+maintainers:
+  - name: Lab Student
+    email: student@example.com
+keywords:
+  - web
+  - application
+  - demo
