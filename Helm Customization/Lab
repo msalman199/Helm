@@ -1,0 +1,983 @@
+Helm Customization
+Lab Objectives
+By the end of this lab, you will be able to:
+
+Create custom Helm charts from scratch for microservices applications
+Understand and implement Helm templating concepts
+Customize Helm charts using values files and template functions
+Deploy and manage custom Helm charts on Kubernetes
+Use Helm templates to configure specific application components
+Implement best practices for Helm chart development
+Prerequisites
+Before starting this lab, you should have:
+
+Basic understanding of Kubernetes concepts (pods, services, deployments)
+Familiarity with YAML syntax
+Basic knowledge of containerization and Docker
+Understanding of microservices architecture concepts
+Experience with command-line interface operations
+Lab Environment
+Al Nafi provides Linux-based cloud machines for this lab. Simply click Start Lab to access your dedicated environment. The provided Linux machine is bare metal with no pre-installed tools, so you will install all required tools during the lab exercises.
+
+Task 1: Environment Setup and Tool Installation
+Subtask 1.1: Install Required Tools
+First, we need to install Docker, kubectl, kind (Kubernetes in Docker), and Helm on our Linux machine.
+
+Step 1: Update the system and install Docker
+
+# Update package manager
+sudo apt update && sudo apt upgrade -y
+
+# Install Docker
+sudo apt install -y docker.io
+sudo systemctl start docker
+sudo systemctl enable docker
+sudo usermod -aG docker $USER
+
+# Verify Docker installation
+docker --version
+Step 2: Install kubectl
+
+# Download kubectl
+curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+
+# Make it executable and move to PATH
+chmod +x kubectl
+sudo mv kubectl /usr/local/bin/
+
+# Verify kubectl installation
+kubectl version --client
+Step 3: Install kind (Kubernetes in Docker)
+
+# Download and install kind
+curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64
+chmod +x ./kind
+sudo mv ./kind /usr/local/bin/kind
+
+# Verify kind installation
+kind version
+Step 4: Install Helm
+
+# Download Helm installation script
+curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+# Verify Helm installation
+helm version
+Subtask 1.2: Create Kubernetes Cluster
+Step 1: Create a kind cluster
+
+# Create cluster configuration file
+cat << EOF > kind-config.yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+- role: control-plane
+  kubeadmConfigPatches:
+  - |
+    kind: InitConfiguration
+    nodeRegistration:
+      kubeletExtraArgs:
+        node-labels: "ingress-ready=true"
+  extraPortMappings:
+  - containerPort: 80
+    hostPort: 80
+    protocol: TCP
+  - containerPort: 443
+    hostPort: 443
+    protocol: TCP
+EOF
+
+# Create the cluster
+kind create cluster --config=kind-config.yaml --name helm-lab
+
+# Verify cluster is running
+kubectl cluster-info
+kubectl get nodes
+Task 2: Write Custom Helm Charts for Microservices
+Subtask 2.1: Create a Basic Microservice Application
+Step 1: Create a simple web application
+
+First, let's create a simple Node.js application that we'll containerize and deploy.
+
+# Create application directory
+mkdir -p ~/microservice-app
+cd ~/microservice-app
+
+# Create package.json
+cat << EOF > package.json
+{
+  "name": "simple-microservice",
+  "version": "1.0.0",
+  "description": "A simple microservice for Helm lab",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.0"
+  }
+}
+EOF
+
+# Create server.js
+cat << EOF > server.js
+const express = require('express');
+const app = express();
+const port = process.env.PORT || 3000;
+
+app.get('/', (req, res) => {
+  res.json({
+    message: 'Hello from Custom Microservice!',
+    service: process.env.SERVICE_NAME || 'unknown',
+    version: process.env.SERVICE_VERSION || '1.0.0',
+    timestamp: new Date().toISOString()
+  });
+});
+
+app.get('/health', (req, res) => {
+  res.json({ status: 'healthy' });
+});
+
+app.listen(port, () => {
+  console.log(\`Server running on port \${port}\`);
+});
+EOF
+
+# Create Dockerfile
+cat << EOF > Dockerfile
+FROM node:16-alpine
+WORKDIR /app
+COPY package.json .
+RUN npm install
+COPY . .
+EXPOSE 3000
+CMD ["npm", "start"]
+EOF
+Step 2: Build and load the Docker image
+
+# Build the Docker image
+docker build -t simple-microservice:v1.0.0 .
+
+# Load image into kind cluster
+kind load docker-image simple-microservice:v1.0.0 --name helm-lab
+
+# Verify image is loaded
+docker exec -it helm-lab-control-plane crictl images | grep simple-microservice
+Subtask 2.2: Create Custom Helm Chart Structure
+Step 1: Create Helm chart directory structure
+
+# Navigate to home directory and create charts directory
+cd ~
+mkdir -p helm-charts
+cd helm-charts
+
+# Create custom chart using Helm
+helm create microservice-chart
+
+# Examine the generated structure
+tree microservice-chart/
+Step 2: Customize the Chart.yaml file
+
+# Navigate to chart directory
+cd microservice-chart
+
+# Update Chart.yaml
+cat << EOF > Chart.yaml
+apiVersion: v2
+name: microservice-chart
+description: A custom Helm chart for microservice deployment
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - microservice
+  - web
+  - api
+home: https://github.com/example/microservice
+sources:
+  - https://github.com/example/microservice
+maintainers:
+  - name: Lab Student
+    email: student@example.com
+EOF
+Subtask 2.3: Create Custom Templates
+Step 1: Customize the deployment template
+
+# Create custom deployment template
+cat << EOF > templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "microservice-chart.fullname" . }}
+  labels:
+    {{- include "microservice-chart.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "microservice-chart.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "microservice-chart.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "microservice-chart.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.targetPort }}
+              protocol: TCP
+          env:
+            - name: SERVICE_NAME
+              value: {{ include "microservice-chart.fullname" . }}
+            - name: SERVICE_VERSION
+              value: {{ .Chart.AppVersion }}
+            - name: PORT
+              value: "{{ .Values.service.targetPort }}"
+            {{- range .Values.env }}
+            - name: {{ .name }}
+              value: {{ .value | quote }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.healthCheck.liveness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.healthCheck.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.healthCheck.liveness.periodSeconds }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.healthCheck.readiness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.healthCheck.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.healthCheck.readiness.periodSeconds }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+EOF
+Step 2: Create custom service template
+
+# Create custom service template
+cat << EOF > templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "microservice-chart.fullname" . }}
+  labels:
+    {{- include "microservice-chart.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.targetPort }}
+      protocol: TCP
+      name: http
+      {{- if and (eq .Values.service.type "NodePort") .Values.service.nodePort }}
+      nodePort: {{ .Values.service.nodePort }}
+      {{- end }}
+  selector:
+    {{- include "microservice-chart.selectorLabels" . | nindent 4 }}
+EOF
+Step 3: Create ConfigMap template
+
+# Create ConfigMap template for application configuration
+cat << EOF > templates/configmap.yaml
+{{- if .Values.config.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "microservice-chart.fullname" . }}-config
+  labels:
+    {{- include "microservice-chart.labels" . | nindent 4 }}
+data:
+  {{- range \$key, \$value := .Values.config.data }}
+  {{ \$key }}: {{ \$value | quote }}
+  {{- end }}
+{{- end }}
+EOF
+Subtask 2.4: Customize Values File
+Step 1: Create comprehensive values.yaml
+
+# Create custom values.yaml
+cat << EOF > values.yaml
+# Default values for microservice-chart
+replicaCount: 2
+
+image:
+  repository: simple-microservice
+  pullPolicy: IfNotPresent
+  tag: "v1.0.0"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  fsGroup: 2000
+
+securityContext:
+  capabilities:
+    drop:
+    - ALL
+  readOnlyRootFilesystem: false
+  runAsNonRoot: true
+  runAsUser: 1000
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 3000
+  annotations: {}
+
+# Environment variables
+env:
+  - name: NODE_ENV
+    value: "production"
+  - name: LOG_LEVEL
+    value: "info"
+
+# Health check configuration
+healthCheck:
+  liveness:
+    path: /health
+    initialDelaySeconds: 30
+    periodSeconds: 10
+  readiness:
+    path: /health
+    initialDelaySeconds: 5
+    periodSeconds: 5
+
+# ConfigMap configuration
+config:
+  enabled: true
+  data:
+    app.name: "Custom Microservice"
+    app.environment: "development"
+    app.debug: "false"
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: microservice.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 250m
+    memory: 256Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 100
+  targetCPUUtilizationPercentage: 80
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+EOF
+Task 3: Use Helm Templates to Configure Specific Components
+Subtask 3.1: Create Advanced Template Functions
+Step 1: Create a helper template for labels
+
+# Update templates/_helpers.tpl with custom functions
+cat << EOF > templates/_helpers.tpl
+{{/*
+Expand the name of the chart.
+*/}}
+{{- define "microservice-chart.name" -}}
+{{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Create a default fully qualified app name.
+*/}}
+{{- define "microservice-chart.fullname" -}}
+{{- if .Values.fullnameOverride }}
+{{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}
+{{- else }}
+{{- \$name := default .Chart.Name .Values.nameOverride }}
+{{- if contains \$name .Release.Name }}
+{{- .Release.Name | trunc 63 | trimSuffix "-" }}
+{{- else }}
+{{- printf "%s-%s" .Release.Name \$name | trunc 63 | trimSuffix "-" }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+Create chart name and version as used by the chart label.
+*/}}
+{{- define "microservice-chart.chart" -}}
+{{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Common labels
+*/}}
+{{- define "microservice-chart.labels" -}}
+helm.sh/chart: {{ include "microservice-chart.chart" . }}
+{{ include "microservice-chart.selectorLabels" . }}
+{{- if .Chart.AppVersion }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+{{- end }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+app.kubernetes.io/component: microservice
+app.kubernetes.io/part-of: {{ include "microservice-chart.name" . }}
+{{- end }}
+
+{{/*
+Selector labels
+*/}}
+{{- define "microservice-chart.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "microservice-chart.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
+
+{{/*
+Create the name of the service account to use
+*/}}
+{{- define "microservice-chart.serviceAccountName" -}}
+{{- if .Values.serviceAccount.create }}
+{{- default (include "microservice-chart.fullname" .) .Values.serviceAccount.name }}
+{{- else }}
+{{- default "default" .Values.serviceAccount.name }}
+{{- end }}
+{{- end }}
+
+{{/*
+Generate environment-specific configuration
+*/}}
+{{- define "microservice-chart.environment" -}}
+{{- if eq .Values.global.environment "production" }}
+production
+{{- else if eq .Values.global.environment "staging" }}
+staging
+{{- else }}
+development
+{{- end }}
+{{- end }}
+
+{{/*
+Generate resource limits based on environment
+*/}}
+{{- define "microservice-chart.resources" -}}
+{{- if eq (include "microservice-chart.environment" .) "production" }}
+limits:
+  cpu: 1000m
+  memory: 1Gi
+requests:
+  cpu: 500m
+  memory: 512Mi
+{{- else }}
+limits:
+  cpu: 500m
+  memory: 512Mi
+requests:
+  cpu: 250m
+  memory: 256Mi
+{{- end }}
+{{- end }}
+EOF
+Step 2: Create conditional ingress template
+
+# Create ingress template with conditions
+cat << EOF > templates/ingress.yaml
+{{- if .Values.ingress.enabled -}}
+{{- \$fullName := include "microservice-chart.fullname" . -}}
+{{- \$svcPort := .Values.service.port -}}
+{{- if and .Values.ingress.className (not (hasKey .Values.ingress.annotations "kubernetes.io/ingress.class")) }}
+  {{- \$_ := set .Values.ingress.annotations "kubernetes.io/ingress.class" .Values.ingress.className}}
+{{- end }}
+{{- if semverCompare ">=1.19-0" .Capabilities.KubeVersion.GitVersion -}}
+apiVersion: networking.k8s.io/v1
+{{- else if semverCompare ">=1.14-0" .Capabilities.KubeVersion.GitVersion -}}
+apiVersion: networking.k8s.io/v1beta1
+{{- else -}}
+apiVersion: extensions/v1beta1
+{{- end }}
+kind: Ingress
+metadata:
+  name: {{ \$fullName }}
+  labels:
+    {{- include "microservice-chart.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if and .Values.ingress.className (semverCompare ">=1.18-0" .Capabilities.KubeVersion.GitVersion) }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+  {{- if .Values.ingress.tls }}
+  tls:
+    {{- range .Values.ingress.tls }}
+    - hosts:
+        {{- range .hosts }}
+        - {{ . | quote }}
+        {{- end }}
+      secretName: {{ .secretName }}
+    {{- end }}
+  {{- end }}
+  rules:
+    {{- range .Values.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            {{- if and .pathType (semverCompare ">=1.18-0" \$.Capabilities.KubeVersion.GitVersion) }}
+            pathType: {{ .pathType }}
+            {{- end }}
+            backend:
+              {{- if semverCompare ">=1.19-0" \$.Capabilities.KubeVersion.GitVersion }}
+              service:
+                name: {{ \$fullName }}
+                port:
+                  number: {{ \$svcPort }}
+              {{- else }}
+              serviceName: {{ \$fullName }}
+              servicePort: {{ \$svcPort }}
+              {{- end }}
+          {{- end }}
+    {{- end }}
+{{- end }}
+EOF
+Subtask 3.2: Create Environment-Specific Value Files
+Step 1: Create development values file
+
+# Create values file for development environment
+cat << EOF > values-dev.yaml
+# Development environment values
+replicaCount: 1
+
+image:
+  repository: simple-microservice
+  tag: "v1.0.0"
+  pullPolicy: IfNotPresent
+
+service:
+  type: NodePort
+  port: 80
+  targetPort: 3000
+  nodePort: 30080
+
+env:
+  - name: NODE_ENV
+    value: "development"
+  - name: LOG_LEVEL
+    value: "debug"
+  - name: DEBUG
+    value: "true"
+
+config:
+  enabled: true
+  data:
+    app.name: "Dev Microservice"
+    app.environment: "development"
+    app.debug: "true"
+    app.logLevel: "debug"
+
+resources:
+  limits:
+    cpu: 200m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+global:
+  environment: development
+EOF
+Step 2: Create production values file
+
+# Create values file for production environment
+cat << EOF > values-prod.yaml
+# Production environment values
+replicaCount: 3
+
+image:
+  repository: simple-microservice
+  tag: "v1.0.0"
+  pullPolicy: Always
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 3000
+
+env:
+  - name: NODE_ENV
+    value: "production"
+  - name: LOG_LEVEL
+    value: "warn"
+  - name: DEBUG
+    value: "false"
+
+config:
+  enabled: true
+  data:
+    app.name: "Production Microservice"
+    app.environment: "production"
+    app.debug: "false"
+    app.logLevel: "warn"
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+global:
+  environment: production
+EOF
+Subtask 3.3: Test and Deploy Custom Charts
+Step 1: Validate the Helm chart
+
+# Lint the chart for syntax errors
+helm lint .
+
+# Validate templates with dry-run
+helm install microservice-dev . --values values-dev.yaml --dry-run --debug
+
+# Check template rendering
+helm template microservice-dev . --values values-dev.yaml
+Step 2: Deploy development environment
+
+# Install the chart in development mode
+helm install microservice-dev . --values values-dev.yaml
+
+# Check deployment status
+kubectl get all -l app.kubernetes.io/instance=microservice-dev
+
+# Check pods are running
+kubectl get pods -l app.kubernetes.io/instance=microservice-dev
+
+# Check service
+kubectl get svc -l app.kubernetes.io/instance=microservice-dev
+Step 3: Test the deployed application
+
+# Port forward to test the application
+kubectl port-forward svc/microservice-dev-microservice-chart 8080:80 &
+
+# Test the application (in a new terminal or after stopping port-forward)
+curl http://localhost:8080/
+curl http://localhost:8080/health
+
+# Stop port-forward
+pkill -f "kubectl port-forward"
+Step 4: Deploy production environment
+
+# Create production namespace
+kubectl create namespace production
+
+# Install production release
+helm install microservice-prod . --values values-prod.yaml --namespace production
+
+# Check production deployment
+kubectl get all -n production -l app.kubernetes.io/instance=microservice-prod
+Subtask 3.4: Upgrade and Rollback Operations
+Step 1: Modify application and create new version
+
+# Go back to application directory
+cd ~/microservice-app
+
+# Update server.js with new version
+cat << EOF > server.js
+const express = require('express');
+const app = express();
+const port = process.env.PORT || 3000;
+
+app.get('/', (req, res) => {
+  res.json({
+    message: 'Hello from Custom Microservice v2!',
+    service: process.env.SERVICE_NAME || 'unknown',
+    version: process.env.SERVICE_VERSION || '2.0.0',
+    timestamp: new Date().toISOString(),
+    features: ['health-check', 'metrics', 'logging']
+  });
+});
+
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'healthy',
+    version: '2.0.0',
+    uptime: process.uptime()
+  });
+});
+
+app.get('/metrics', (req, res) => {
+  res.json({
+    requests: Math.floor(Math.random() * 1000),
+    memory: process.memoryUsage(),
+    uptime: process.uptime()
+  });
+});
+
+app.listen(port, () => {
+  console.log(\`Server v2.0.0 running on port \${port}\`);
+});
+EOF
+
+# Build new version
+docker build -t simple-microservice:v2.0.0 .
+kind load docker-image simple-microservice:v2.0.0 --name helm-lab
+Step 2: Upgrade the Helm release
+
+# Go back to chart directory
+cd ~/helm-charts/microservice-chart
+
+# Update Chart.yaml version
+sed -i 's/appVersion: "1.0.0"/appVersion: "2.0.0"/' Chart.yaml
+
+# Create upgrade values
+cat << EOF > values-upgrade.yaml
+# Upgrade values
+replicaCount: 2
+
+image:
+  repository: simple-microservice
+  tag: "v2.0.0"
+  pullPolicy: IfNotPresent
+
+service:
+  type: NodePort
+  port: 80
+  targetPort: 3000
+  nodePort: 30080
+
+env:
+  - name: NODE_ENV
+    value: "development"
+  - name: LOG_LEVEL
+    value: "info"
+  - name: FEATURE_METRICS
+    value: "true"
+
+config:
+  enabled: true
+  data:
+    app.name: "Upgraded Microservice"
+    app.environment: "development"
+    app.version: "2.0.0"
+    app.features: "metrics,health-check"
+
+global:
+  environment: development
+EOF
+
+# Upgrade the release
+helm upgrade microservice-dev . --values values-upgrade.yaml
+
+# Check upgrade status
+helm status microservice-dev
+kubectl get pods -l app.kubernetes.io/instance=microservice-dev
+Step 3: Test upgraded application
+
+# Port forward to test upgraded application
+kubectl port-forward svc/microservice-dev-microservice-chart 8080:80 &
+
+# Test new endpoints
+curl http://localhost:8080/
+curl http://localhost:8080/health
+curl http://localhost:8080/metrics
+
+# Stop port-forward
+pkill -f "kubectl port-forward"
+Step 4: Rollback if needed
+
+# Check release history
+helm history microservice-dev
+
+# Rollback to previous version
+helm rollback microservice-dev 1
+
+# Verify rollback
+helm status microservice-dev
+kubectl get pods -l app.kubernetes.io/instance=microservice-dev
+Subtask 3.5: Package and Share Charts
+Step 1: Package the Helm chart
+
+# Package the chart
+helm package .
+
+# List the packaged chart
+ls -la *.tgz
+
+# Create chart repository index
+helm repo index . --url https://example.com/charts
+Step 2: Create chart documentation
+
+# Create README for the chart
+cat << EOF > README.md
+# Microservice Helm Chart
+
+This Helm chart deploys a custom microservice application on Kubernetes.
+
+## Features
+
+- Configurable replica count
+- Environment-specific configurations
+- Health checks and readiness probes
+- Resource limits and requests
+- Horizontal Pod Autoscaling support
+- Ingress configuration
+- ConfigMap support
+
+## Installation
+
+\`\`\`bash
+helm install my-microservice ./microservice-chart
+\`\`\`
+
+## Configuration
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| \`replicaCount\` | Number of replicas | \`2\` |
+| \`image.repository\` | Image repository | \`simple-microservice\` |
+| \`image.tag\` | Image tag | \`v1.0.0\` |
+| \`service.type\` | Service type | \`ClusterIP\` |
+| \`service.port\` | Service port | \`80\` |
+
+## Examples
+
+### Development Deployment
+\`\`\`bash
+helm install microservice-dev . --values values-dev.yaml
+\`\`\`
+
+### Production Deployment
+\`\`\`bash
+helm install microservice-prod . --values values-prod.yaml --namespace production
+\`\`\`
+EOF
+Verification and Testing
+Step 1: Comprehensive Testing
+# Test all deployments
+echo "Testing Development Environment:"
+kubectl get all -l app.kubernetes.io/instance=microservice-dev
+
+echo "Testing Production Environment:"
+kubectl get all -n production -l app.kubernetes.io/instance=microservice-prod
+
+# Test chart validation
+helm lint .
+echo "Chart validation completed"
+
+# Test template rendering for different environments
+echo "Rendering development templates:"
+helm template test-dev . --values values-dev.yaml > dev-rendered.yaml
+
+echo "Rendering production templates:"
+helm template test-prod . --values values-prod.yaml > prod-rendered.yaml
+
+# Compare rendered templates
+echo "Development and Production template differences:"
+diff dev-rendered.yaml prod-rendered.yaml || true
+Step 2: Clean Up Resources
+# Uninstall releases
+helm uninstall microservice-dev
+helm uninstall microservice-prod --namespace production
+
+# Delete namespace
+kubectl delete namespace production
+
+# Verify cleanup
+kubectl get all
+helm list --all-namespaces
+Troubleshooting Tips
+Common Issues and Solutions
+Issue 1: Image Pull Errors
+
+Problem: Pods stuck in ImagePullBackOff state
+Solution: Ensure the Docker image is loaded into the kind cluster using kind load docker-image
+Issue 2: Template Rendering Errors
+
+Problem: Helm template syntax errors
+Solution: Use helm template command to debug template rendering and check YAML indentation
+Issue 3: Service Not Accessible
+
+Problem: Cannot access the service externally
+Solution: For kind clusters, use NodePort services or port-forwarding for testing
+Issue 4: Resource Limits
+
+Problem: Pods being killed due to resource constraints
+Solution: Adjust resource limits in values files based on your system capabilities
+Conclusion
+In this comprehensive lab, you have successfully:
+
+Created a complete development environment with Docker, Kubernetes (kind), and Helm
+Built a custom microservice application from scratch using Node.js and containerized it with Docker
+Developed custom Helm charts with advanced templating features including conditional logic, helper functions, and environment-specific configurations
+Implemented Helm best practices such as proper labeling, resource management, health checks, and configuration management
+Created multiple deployment environments (development and production) with different configurations
+Performed chart lifecycle operations including installation, upgrades, rollbacks, and cleanup
+Used advanced Helm templating features like conditional statements, loops, and custom helper functions
+Packaged and documented your custom Helm charts for sharing and reuse
+This lab demonstrates the power and flexibility of Helm for managing complex Kubernetes deployments. The skills you've learned here are directly applicable to real-world scenarios where you need to deploy and manage microservices across different environments with varying configurations.
+
+Key Takeaways:
+
+Helm charts provide a powerful way to template and manage Kubernetes resources
+Custom values files enable environment-specific deployments without changing chart templates
+Template functions and helpers promote code reuse and maintainability
+Proper chart structure and documentation are essential for team collaboration
+Helm's upgrade and rollback capabilities provide safe deployment practices
+These skills form the foundation for advanced Kubernetes application management and are essential for DevOps engineers working with containerized applications at scale.
