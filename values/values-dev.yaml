@@ -1,0 +1,23 @@
+global:
+  environment: development
+  monitoring:
+    enabled: false
+
+replicaCount: 1
+
+image:
+  tag: "1.25"
+
+env:
+  - name: APP_ENV
+    value: "development"
+  - name: LOG_LEVEL
+    value: "debug"
+
+configMap:
+  enabled: true
+  data:
+    app.properties: |
+      app.name=webapp-dev
+      log.level=debug
+      database.pool.size=2

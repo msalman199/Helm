@@ -1,0 +1,22 @@
+replicaCount: 3
+image:
+  repository: nginx
+  tag: "1.21"
+service:
+  type: LoadBalancer
+  port: 80
+
+mysql:
+  auth:
+    rootPassword: "secretpassword"
+    database: "myapp"
+  primary:
+    persistence:
+      enabled: false
+
+redis:
+  auth:
+    enabled: false
+  master:
+    persistence:
+      enabled: false

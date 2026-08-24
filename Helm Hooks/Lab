@@ -1,0 +1,684 @@
+Helm Hooks
+Lab Objectives
+By the end of this lab, students will be able to:
+
+Understand the concept and purpose of Helm hooks in Kubernetes deployments
+Create and implement pre-install hooks to prepare the environment before application deployment
+Develop post-upgrade hooks to perform cleanup and validation tasks after upgrades
+Automate Kubernetes job execution using Helm hooks
+Configure hook weights and deletion policies for proper execution order
+Troubleshoot common issues with Helm hook implementations
+Prerequisites
+Before starting this lab, students should have:
+
+Basic understanding of Kubernetes concepts (pods, services, deployments)
+Familiarity with YAML file structure and syntax
+Basic knowledge of Helm charts and templating
+Understanding of Linux command-line operations
+Experience with text editors (nano, vim, or similar)
+Lab Environment
+Al Nafi provides Linux-based cloud machines for this lab. Simply click Start Lab to access your dedicated environment. The provided Linux machine is bare metal with no pre-installed tools, so you will install all required tools during the lab exercises.
+
+Task 1: Environment Setup and Tool Installation
+Subtask 1.1: Install Required Tools
+First, update the system and install necessary packages:
+
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y curl wget git nano
+Subtask 1.2: Install Docker
+Install Docker for container runtime:
+
+curl -fsSL https://get.docker.com -o get-docker.sh
+sudo sh get-docker.sh
+sudo usermod -aG docker $USER
+newgrp docker
+Verify Docker installation:
+
+docker --version
+Subtask 1.3: Install kubectl
+Download and install kubectl:
+
+curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+Verify kubectl installation:
+
+kubectl version --client
+Subtask 1.4: Install Minikube
+Install Minikube for local Kubernetes cluster:
+
+curl -Lo minikube https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
+chmod +x minikube
+sudo mv minikube /usr/local/bin/
+Start Minikube cluster:
+
+minikube start --driver=docker
+Verify cluster is running:
+
+kubectl cluster-info
+kubectl get nodes
+Subtask 1.5: Install Helm
+Download and install Helm:
+
+curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+Verify Helm installation:
+
+helm version
+Task 2: Create Pre-Install and Post-Upgrade Hooks
+Subtask 2.1: Create Project Directory Structure
+Create the directory structure for your Helm chart:
+
+mkdir -p ~/helm-hooks-lab
+cd ~/helm-hooks-lab
+helm create webapp-with-hooks
+cd webapp-with-hooks
+Subtask 2.2: Create Pre-Install Hook
+Create a directory for hook templates:
+
+mkdir -p templates/hooks
+Create a pre-install hook that sets up a ConfigMap with initial configuration:
+
+nano templates/hooks/pre-install-setup.yaml
+Add the following content:
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: "{{ include "webapp-with-hooks.fullname" . }}-pre-install"
+  labels:
+    {{- include "webapp-with-hooks.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  template:
+    metadata:
+      name: "{{ include "webapp-with-hooks.fullname" . }}-pre-install"
+      labels:
+        {{- include "webapp-with-hooks.selectorLabels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: pre-install-setup
+        image: busybox:1.35
+        command:
+        - /bin/sh
+        - -c
+        - |
+          echo "Starting pre-install setup..."
+          echo "Creating initial configuration..."
+          echo "Pre-install setup completed successfully!"
+          sleep 10
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: "{{ include "webapp-with-hooks.fullname" . }}-initial-config"
+  labels:
+    {{- include "webapp-with-hooks.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install
+    "helm.sh/hook-weight": "-3"
+data:
+  app.properties: |
+    environment=production
+    debug=false
+    initial.setup=true
+    created.by=pre-install-hook
+Subtask 2.3: Create Post-Upgrade Hook
+Create a post-upgrade hook for validation and cleanup:
+
+nano templates/hooks/post-upgrade-validation.yaml
+Add the following content:
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: "{{ include "webapp-with-hooks.fullname" . }}-post-upgrade"
+  labels:
+    {{- include "webapp-with-hooks.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-upgrade
+    "helm.sh/hook-weight": "1"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  template:
+    metadata:
+      name: "{{ include "webapp-with-hooks.fullname" . }}-post-upgrade"
+      labels:
+        {{- include "webapp-with-hooks.selectorLabels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: post-upgrade-validation
+        image: busybox:1.35
+        command:
+        - /bin/sh
+        - -c
+        - |
+          echo "Starting post-upgrade validation..."
+          echo "Checking application health..."
+          echo "Validating configuration..."
+          echo "Cleaning up temporary resources..."
+          echo "Post-upgrade validation completed successfully!"
+          sleep 15
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: "{{ include "webapp-with-hooks.fullname" . }}-cleanup"
+  labels:
+    {{- include "webapp-with-hooks.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  template:
+    metadata:
+      name: "{{ include "webapp-with-hooks.fullname" . }}-cleanup"
+      labels:
+        {{- include "webapp-with-hooks.selectorLabels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: cleanup
+        image: busybox:1.35
+        command:
+        - /bin/sh
+        - -c
+        - |
+          echo "Starting cleanup process..."
+          echo "Removing old cache files..."
+          echo "Updating system metrics..."
+          echo "Cleanup process completed!"
+          sleep 10
+Subtask 2.4: Create Database Migration Hook
+Create a pre-upgrade hook for database migrations:
+
+nano templates/hooks/pre-upgrade-migration.yaml
+Add the following content:
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: "{{ include "webapp-with-hooks.fullname" . }}-db-migration"
+  labels:
+    {{- include "webapp-with-hooks.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-upgrade
+    "helm.sh/hook-weight": "-1"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  template:
+    metadata:
+      name: "{{ include "webapp-with-hooks.fullname" . }}-db-migration"
+      labels:
+        {{- include "webapp-with-hooks.selectorLabels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: db-migration
+        image: busybox:1.35
+        command:
+        - /bin/sh
+        - -c
+        - |
+          echo "Starting database migration..."
+          echo "Backing up current database..."
+          echo "Running migration scripts..."
+          echo "Validating migration results..."
+          echo "Database migration completed successfully!"
+          sleep 20
+Subtask 2.5: Update Main Application Deployment
+Modify the main deployment to use the ConfigMap created by the pre-install hook:
+
+nano templates/deployment.yaml
+Replace the content with:
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "webapp-with-hooks.fullname" . }}
+  labels:
+    {{- include "webapp-with-hooks.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "webapp-with-hooks.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "webapp-with-hooks.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+          env:
+            - name: CONFIG_SOURCE
+              value: "helm-hook-generated"
+          volumeMounts:
+            - name: config-volume
+              mountPath: /etc/config
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: config-volume
+          configMap:
+            name: "{{ include "webapp-with-hooks.fullname" . }}-initial-config"
+Task 3: Automate Kubernetes Job Execution
+Subtask 3.1: Create Test Hook
+Create a test hook to demonstrate job automation:
+
+nano templates/hooks/test-hook.yaml
+Add the following content:
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "{{ include "webapp-with-hooks.fullname" . }}-test"
+  labels:
+    {{- include "webapp-with-hooks.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  containers:
+  - name: test
+    image: busybox:1.35
+    command:
+    - /bin/sh
+    - -c
+    - |
+      echo "Running application tests..."
+      echo "Testing configuration..."
+      if [ -f /etc/config/app.properties ]; then
+        echo "Configuration file found!"
+        cat /etc/config/app.properties
+      else
+        echo "Configuration file not found!"
+        exit 1
+      fi
+      echo "Testing network connectivity..."
+      nslookup {{ include "webapp-with-hooks.fullname" . }}
+      echo "All tests passed successfully!"
+    volumeMounts:
+    - name: config-volume
+      mountPath: /etc/config
+  volumes:
+  - name: config-volume
+    configMap:
+      name: "{{ include "webapp-with-hooks.fullname" . }}-initial-config"
+Subtask 3.2: Create Backup Hook
+Create a pre-delete hook for backup operations:
+
+nano templates/hooks/pre-delete-backup.yaml
+Add the following content:
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: "{{ include "webapp-with-hooks.fullname" . }}-backup"
+  labels:
+    {{- include "webapp-with-hooks.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-delete
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": hook-succeeded
+spec:
+  template:
+    metadata:
+      name: "{{ include "webapp-with-hooks.fullname" . }}-backup"
+      labels:
+        {{- include "webapp-with-hooks.selectorLabels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: backup
+        image: busybox:1.35
+        command:
+        - /bin/sh
+        - -c
+        - |
+          echo "Starting backup process..."
+          echo "Creating data backup..."
+          echo "Backing up configuration..."
+          echo "Storing backup in persistent storage..."
+          echo "Backup process completed successfully!"
+          sleep 15
+Subtask 3.3: Create Monitoring Setup Hook
+Create a post-install hook for monitoring setup:
+
+nano templates/hooks/post-install-monitoring.yaml
+Add the following content:
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: "{{ include "webapp-with-hooks.fullname" . }}-monitoring-setup"
+  labels:
+    {{- include "webapp-with-hooks.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install
+    "helm.sh/hook-weight": "3"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  template:
+    metadata:
+      name: "{{ include "webapp-with-hooks.fullname" . }}-monitoring-setup"
+      labels:
+        {{- include "webapp-with-hooks.selectorLabels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: monitoring-setup
+        image: busybox:1.35
+        command:
+        - /bin/sh
+        - -c
+        - |
+          echo "Setting up monitoring..."
+          echo "Configuring health checks..."
+          echo "Setting up alerting rules..."
+          echo "Registering application with monitoring system..."
+          echo "Monitoring setup completed!"
+          sleep 12
+Subtask 3.4: Update Values File
+Update the values.yaml file to include hook-specific configurations:
+
+nano values.yaml
+Add the following at the end of the file:
+
+# Hook configurations
+hooks:
+  enabled: true
+  preInstall:
+    enabled: true
+    timeout: 300
+  postInstall:
+    enabled: true
+    timeout: 300
+  preUpgrade:
+    enabled: true
+    timeout: 600
+  postUpgrade:
+    enabled: true
+    timeout: 300
+  preDelete:
+    enabled: true
+    timeout: 300
+  test:
+    enabled: true
+    timeout: 180
+
+# Application configuration
+app:
+  environment: production
+  debug: false
+  monitoring:
+    enabled: true
+Task 4: Deploy and Test Helm Hooks
+Subtask 4.1: Validate Chart Template
+First, validate your Helm chart templates:
+
+cd ~/helm-hooks-lab/webapp-with-hooks
+helm template . --debug
+Check for any syntax errors and fix them if necessary.
+
+Subtask 4.2: Install the Chart
+Install the chart and observe the hook execution:
+
+helm install webapp-hooks . --debug --wait --timeout=10m
+Monitor the hook execution:
+
+kubectl get jobs -w
+In another terminal, watch the pods:
+
+kubectl get pods -w
+Subtask 4.3: Verify Hook Execution
+Check the logs of the pre-install hook:
+
+kubectl logs job/webapp-hooks-webapp-with-hooks-pre-install
+Verify the ConfigMap was created:
+
+kubectl get configmap webapp-hooks-webapp-with-hooks-initial-config -o yaml
+Check the main application deployment:
+
+kubectl get deployment webapp-hooks-webapp-with-hooks
+kubectl describe deployment webapp-hooks-webapp-with-hooks
+Subtask 4.4: Run Helm Tests
+Execute the test hooks:
+
+helm test webapp-hooks
+Check test results:
+
+kubectl logs webapp-hooks-webapp-with-hooks-test
+Subtask 4.5: Perform an Upgrade
+Modify the values.yaml to trigger an upgrade:
+
+nano values.yaml
+Change the replica count:
+
+replicaCount: 2
+Perform the upgrade:
+
+helm upgrade webapp-hooks . --debug --wait --timeout=10m
+Monitor the upgrade hooks:
+
+kubectl get jobs
+kubectl logs job/webapp-hooks-webapp-with-hooks-db-migration
+kubectl logs job/webapp-hooks-webapp-with-hooks-post-upgrade
+kubectl logs job/webapp-hooks-webapp-with-hooks-cleanup
+Subtask 4.6: Test Hook Weights and Execution Order
+Check the execution order by examining timestamps:
+
+kubectl get jobs --sort-by=.metadata.creationTimestamp
+View detailed information about hook execution:
+
+helm history webapp-hooks
+Task 5: Advanced Hook Scenarios
+Subtask 5.1: Create Conditional Hooks
+Create a hook that runs conditionally based on values:
+
+nano templates/hooks/conditional-hook.yaml
+Add the following content:
+
+{{- if .Values.hooks.enabled }}
+{{- if .Values.hooks.preInstall.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: "{{ include "webapp-with-hooks.fullname" . }}-conditional-setup"
+  labels:
+    {{- include "webapp-with-hooks.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install
+    "helm.sh/hook-weight": "-2"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  template:
+    metadata:
+      name: "{{ include "webapp-with-hooks.fullname" . }}-conditional-setup"
+      labels:
+        {{- include "webapp-with-hooks.selectorLabels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: conditional-setup
+        image: busybox:1.35
+        command:
+        - /bin/sh
+        - -c
+        - |
+          echo "Running conditional pre-install setup..."
+          echo "Environment: {{ .Values.app.environment }}"
+          echo "Debug mode: {{ .Values.app.debug }}"
+          {{- if .Values.app.monitoring.enabled }}
+          echo "Monitoring is enabled"
+          {{- else }}
+          echo "Monitoring is disabled"
+          {{- end }}
+          echo "Conditional setup completed!"
+          sleep 8
+{{- end }}
+{{- end }}
+Subtask 5.2: Create Hook with Resource Dependencies
+Create a hook that waits for resources to be ready:
+
+nano templates/hooks/resource-dependency-hook.yaml
+Add the following content:
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: "{{ include "webapp-with-hooks.fullname" . }}-dependency-check"
+  labels:
+    {{- include "webapp-with-hooks.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install
+    "helm.sh/hook-weight": "1"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  template:
+    metadata:
+      name: "{{ include "webapp-with-hooks.fullname" . }}-dependency-check"
+      labels:
+        {{- include "webapp-with-hooks.selectorLabels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: dependency-check
+        image: busybox:1.35
+        command:
+        - /bin/sh
+        - -c
+        - |
+          echo "Checking resource dependencies..."
+          echo "Waiting for deployment to be ready..."
+          
+          # Simulate waiting for deployment
+          for i in $(seq 1 10); do
+            echo "Check $i: Verifying deployment status..."
+            sleep 2
+          done
+          
+          echo "All dependencies are ready!"
+          echo "Application is fully operational!"
+Subtask 5.3: Test Advanced Scenarios
+Upgrade the chart with the new hooks:
+
+helm upgrade webapp-hooks . --debug --wait --timeout=10m
+Verify all hooks executed correctly:
+
+kubectl get jobs
+kubectl logs job/webapp-hooks-webapp-with-hooks-conditional-setup
+kubectl logs job/webapp-hooks-webapp-with-hooks-dependency-check
+Task 6: Troubleshooting and Cleanup
+Subtask 6.1: Common Troubleshooting
+Check for failed hooks:
+
+kubectl get jobs --field-selector status.successful!=1
+View hook pod logs for debugging:
+
+kubectl get pods --selector=job-name
+kubectl logs <hook-pod-name>
+Check hook annotations:
+
+kubectl get jobs -o yaml | grep -A 5 -B 5 "helm.sh/hook"
+Subtask 6.2: Hook Cleanup Testing
+Test the pre-delete hook by uninstalling:
+
+helm uninstall webapp-hooks --debug --wait --timeout=10m
+Monitor the backup hook execution:
+
+kubectl get jobs -w
+kubectl logs job/webapp-hooks-webapp-with-hooks-backup
+Subtask 6.3: Verify Complete Cleanup
+Ensure all resources are cleaned up:
+
+kubectl get all
+kubectl get configmaps
+kubectl get jobs
+Troubleshooting Tips
+Common Issues and Solutions
+Hook Job Fails to Start
+
+Check resource quotas and limits
+Verify image availability
+Review RBAC permissions
+Hook Execution Timeout
+
+Increase timeout values in hook annotations
+Optimize hook script execution time
+Check resource constraints
+Hook Weight Not Working
+
+Ensure proper weight values (negative for pre-hooks, positive for post-hooks)
+Verify hook annotations syntax
+Check for conflicting weights
+ConfigMap Not Available
+
+Verify pre-install hooks completed successfully
+Check hook execution order
+Ensure proper dependency management
+Debugging Commands
+# View all hooks in a release
+helm get hooks <release-name>
+
+# Check hook execution history
+kubectl describe job <hook-job-name>
+
+# View hook pod events
+kubectl get events --sort-by=.metadata.creationTimestamp
+
+# Debug hook templates
+helm template . --debug --show-only templates/hooks/
+Conclusion
+In this comprehensive lab, you have successfully learned how to implement and manage Helm hooks for automating Kubernetes tasks during deployment lifecycles. You accomplished the following key objectives:
+
+Technical Skills Developed:
+
+Created and configured multiple types of Helm hooks including pre-install, post-install, pre-upgrade, post-upgrade, and pre-delete hooks
+Implemented automated Kubernetes job execution using hook annotations and weights
+Developed conditional hooks that execute based on configuration values
+Mastered hook deletion policies and execution ordering
+Practical Applications:
+
+Set up environment preparation through pre-install hooks
+Automated database migrations using pre-upgrade hooks
+Implemented validation and cleanup processes with post-upgrade hooks
+Created backup automation through pre-delete hooks
+Established monitoring and testing automation
+Key Concepts Mastered:
+
+Hook Lifecycle Management: Understanding when and how different hooks execute during Helm operations
+Execution Ordering: Using hook weights to control the sequence of hook execution
+Resource Dependencies: Creating hooks that depend on other resources being ready
+Conditional Execution: Implementing hooks that run based on configuration conditions
+Cleanup Strategies: Managing hook resource cleanup through deletion policies
+Real-World Relevance: Helm hooks are essential for production Kubernetes deployments where you need to automate complex deployment workflows. The skills you've developed enable you to create robust, automated deployment pipelines that handle database migrations, environment setup, validation, monitoring configuration, and cleanup operations seamlessly.
+
+This knowledge is particularly valuable for DevOps engineers, Kubernetes administrators, and developers working with complex microservices architectures where deployment automation and reliability are critical for maintaining high-availability systems.
+
+The hands-on experience with hook weights, deletion policies, and conditional execution provides you with the expertise needed to design sophisticated deployment automation that can handle enterprise-level requirements and edge cases effectively.

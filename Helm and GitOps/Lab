@@ -1,0 +1,764 @@
+Lab 10: Helm and GitOps
+Lab Objectives
+By the end of this lab, you will be able to:
+
+Understand the fundamentals of GitOps methodology and its benefits
+Install and configure Helm package manager for Kubernetes
+Set up a local Kubernetes cluster using kind (Kubernetes in Docker)
+Install and configure ArgoCD for GitOps continuous delivery
+Create Helm charts for application deployment
+Implement a complete GitOps workflow using Helm and ArgoCD
+Automate application deployment and updates through Git repository changes
+Monitor and manage applications deployed through GitOps
+Prerequisites
+Before starting this lab, you should have:
+
+Basic understanding of Kubernetes concepts (pods, services, deployments)
+Familiarity with Git version control system
+Basic knowledge of YAML file structure
+Understanding of containerization concepts
+Experience with Linux command line operations
+Lab Environment
+Al Nafi Cloud Machine: This lab runs entirely on a single Linux machine provided by Al Nafi. Simply click Start Lab to access your dedicated cloud environment. The machine comes as bare metal with no pre-installed tools, so we will install all required components during the lab.
+
+Task 1: Environment Setup and Tool Installation
+Subtask 1.1: Update System and Install Prerequisites
+First, let's update the system and install essential tools.
+
+# Update package lists
+sudo apt update && sudo apt upgrade -y
+
+# Install essential packages
+sudo apt install -y curl wget git vim nano unzip software-properties-common apt-transport-https ca-certificates gnupg lsb-release
+
+# Install Docker
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io
+
+# Add current user to docker group
+sudo usermod -aG docker $USER
+
+# Start and enable Docker
+sudo systemctl start docker
+sudo systemctl enable docker
+
+# Verify Docker installation
+docker --version
+Subtask 1.2: Install kubectl
+Install the Kubernetes command-line tool.
+
+# Download kubectl
+curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+
+# Make kubectl executable
+chmod +x kubectl
+
+# Move kubectl to PATH
+sudo mv kubectl /usr/local/bin/
+
+# Verify installation
+kubectl version --client
+Subtask 1.3: Install kind (Kubernetes in Docker)
+Install kind to create a local Kubernetes cluster.
+
+# Download kind
+curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64
+
+# Make kind executable
+chmod +x ./kind
+
+# Move kind to PATH
+sudo mv ./kind /usr/local/bin/kind
+
+# Verify installation
+kind version
+Subtask 1.4: Install Helm
+Install Helm package manager for Kubernetes.
+
+# Download Helm installation script
+curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+# Verify Helm installation
+helm version
+Subtask 1.5: Create Kubernetes Cluster
+Create a local Kubernetes cluster using kind.
+
+# Create kind cluster configuration
+cat << EOF > kind-config.yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+- role: control-plane
+  kubeadmConfigPatches:
+  - |
+    kind: InitConfiguration
+    nodeRegistration:
+      kubeletExtraArgs:
+        node-labels: "ingress-ready=true"
+  extraPortMappings:
+  - containerPort: 80
+    hostPort: 80
+    protocol: TCP
+  - containerPort: 443
+    hostPort: 443
+    protocol: TCP
+  - containerPort: 30080
+    hostPort: 30080
+    protocol: TCP
+EOF
+
+# Create the cluster
+kind create cluster --config=kind-config.yaml --name=gitops-lab
+
+# Verify cluster is running
+kubectl cluster-info
+kubectl get nodes
+Task 2: Set up Helm in a GitOps Workflow
+Subtask 2.1: Create Git Repository Structure
+Set up a local Git repository to simulate a GitOps workflow.
+
+# Create project directory
+mkdir -p ~/gitops-lab
+cd ~/gitops-lab
+
+# Initialize Git repository
+git init
+
+# Configure Git (replace with your details)
+git config user.name "GitOps Lab User"
+git config user.email "user@gitopslab.com"
+
+# Create directory structure
+mkdir -p {applications,helm-charts,argocd-apps}
+
+# Create README file
+cat << EOF > README.md
+# GitOps Lab Repository
+
+This repository contains:
+- Helm charts for applications
+- ArgoCD application definitions
+- GitOps workflow configurations
+EOF
+
+# Initial commit
+git add .
+git commit -m "Initial repository setup"
+Subtask 2.2: Create Sample Application Helm Chart
+Create a Helm chart for a sample web application.
+
+# Navigate to helm-charts directory
+cd ~/gitops-lab/helm-charts
+
+# Create Helm chart
+helm create sample-app
+
+# Navigate to the chart directory
+cd sample-app
+
+# Customize values.yaml
+cat << EOF > values.yaml
+replicaCount: 2
+
+image:
+  repository: nginx
+  pullPolicy: IfNotPresent
+  tag: "1.21"
+
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: NodePort
+  port: 80
+  nodePort: 30080
+
+ingress:
+  enabled: false
+
+resources:
+  limits:
+    cpu: 100m
+    memory: 128Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+autoscaling:
+  enabled: false
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+EOF
+
+# Update deployment template to use NodePort
+cat << EOF > templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "sample-app.fullname" . }}
+  labels:
+    {{- include "sample-app.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "sample-app.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "sample-app.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+EOF
+
+# Validate the Helm chart
+helm lint .
+
+# Test template rendering
+helm template sample-app . --dry-run
+Subtask 2.3: Package and Test Helm Chart
+Package the Helm chart and test deployment.
+
+# Navigate back to helm-charts directory
+cd ~/gitops-lab/helm-charts
+
+# Package the chart
+helm package sample-app/
+
+# Create Helm repository index
+helm repo index . --url http://localhost:8080
+
+# Test direct deployment (we'll remove this later for GitOps)
+helm install sample-app-test ./sample-app
+
+# Verify deployment
+kubectl get pods
+kubectl get services
+
+# Check if application is accessible
+curl http://localhost:30080
+
+# Clean up test deployment
+helm uninstall sample-app-test
+Task 3: Automate Deployment using ArgoCD
+Subtask 3.1: Install ArgoCD
+Install ArgoCD in the Kubernetes cluster.
+
+# Create ArgoCD namespace
+kubectl create namespace argocd
+
+# Install ArgoCD
+kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+
+# Wait for ArgoCD pods to be ready
+kubectl wait --for=condition=available --timeout=300s deployment/argocd-server -n argocd
+
+# Verify ArgoCD installation
+kubectl get pods -n argocd
+Subtask 3.2: Access ArgoCD UI
+Set up access to the ArgoCD web interface.
+
+# Get ArgoCD admin password
+ARGOCD_PASSWORD=$(kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d)
+echo "ArgoCD Admin Password: $ARGOCD_PASSWORD"
+
+# Port forward ArgoCD server
+kubectl port-forward svc/argocd-server -n argocd 8080:443 &
+
+# Install ArgoCD CLI
+curl -sSL -o argocd-linux-amd64 https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+sudo install -m 555 argocd-linux-amd64 /usr/local/bin/argocd
+rm argocd-linux-amd64
+
+# Login to ArgoCD CLI (skip TLS verification for local setup)
+argocd login localhost:8080 --username admin --password $ARGOCD_PASSWORD --insecure
+
+echo "ArgoCD is accessible at: https://localhost:8080"
+echo "Username: admin"
+echo "Password: $ARGOCD_PASSWORD"
+Subtask 3.3: Create ArgoCD Application
+Create an ArgoCD application definition for our Helm chart.
+
+# Navigate to argocd-apps directory
+cd ~/gitops-lab/argocd-apps
+
+# Create ArgoCD application manifest
+cat << EOF > sample-app-argocd.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: sample-app
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: file:///tmp/gitops-lab
+    targetRevision: HEAD
+    path: helm-charts/sample-app
+    helm:
+      valueFiles:
+        - values.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+EOF
+
+# Since we're working locally, we need to make our repo accessible to ArgoCD
+# Copy our repository to a location ArgoCD can access
+sudo mkdir -p /tmp/gitops-lab
+sudo cp -r ~/gitops-lab/* /tmp/gitops-lab/
+sudo chown -R 999:999 /tmp/gitops-lab
+Subtask 3.4: Deploy Application via ArgoCD
+Deploy the application using ArgoCD.
+
+# Apply the ArgoCD application
+kubectl apply -f ~/gitops-lab/argocd-apps/sample-app-argocd.yaml
+
+# Check application status
+argocd app list
+
+# Get detailed application information
+argocd app get sample-app
+
+# Sync the application
+argocd app sync sample-app
+
+# Wait for application to be healthy
+argocd app wait sample-app --health
+Subtask 3.5: Verify GitOps Deployment
+Verify that the application is deployed and running.
+
+# Check deployed resources
+kubectl get all
+
+# Verify pods are running
+kubectl get pods -l app.kubernetes.io/name=sample-app
+
+# Check service
+kubectl get svc sample-app
+
+# Test application accessibility
+curl http://localhost:30080
+
+# Check ArgoCD application status
+argocd app get sample-app --show-params
+Task 4: Implement GitOps Workflow
+Subtask 4.1: Simulate GitOps Update Process
+Demonstrate how GitOps works by updating the application through Git.
+
+# Navigate to the Helm chart
+cd ~/gitops-lab/helm-charts/sample-app
+
+# Update the application - change replica count
+sed -i 's/replicaCount: 2/replicaCount: 3/' values.yaml
+
+# Update image tag
+sed -i 's/tag: "1.21"/tag: "1.22"/' values.yaml
+
+# Commit changes
+cd ~/gitops-lab
+git add .
+git commit -m "Update sample-app: increase replicas to 3 and nginx to 1.22"
+
+# Update the repository copy that ArgoCD uses
+sudo cp -r ~/gitops-lab/* /tmp/gitops-lab/
+sudo chown -R 999:999 /tmp/gitops-lab
+Subtask 4.2: Observe Automatic Synchronization
+Watch ArgoCD automatically detect and apply changes.
+
+# Check current pod count
+kubectl get pods -l app.kubernetes.io/name=sample-app
+
+# Force ArgoCD to refresh (in production, this happens automatically)
+argocd app sync sample-app
+
+# Watch the rollout
+kubectl rollout status deployment/sample-app
+
+# Verify new replica count
+kubectl get pods -l app.kubernetes.io/name=sample-app
+
+# Check image version in deployment
+kubectl describe deployment sample-app | grep Image
+Subtask 4.3: Create Additional Environment
+Create a staging environment to demonstrate multi-environment GitOps.
+
+# Create staging namespace
+kubectl create namespace staging
+
+# Create staging ArgoCD application
+cat << EOF > ~/gitops-lab/argocd-apps/sample-app-staging.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: sample-app-staging
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: file:///tmp/gitops-lab
+    targetRevision: HEAD
+    path: helm-charts/sample-app
+    helm:
+      valueFiles:
+        - values.yaml
+      parameters:
+        - name: replicaCount
+          value: "1"
+        - name: service.nodePort
+          value: "30081"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: staging
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+EOF
+
+# Apply staging application
+kubectl apply -f ~/gitops-lab/argocd-apps/sample-app-staging.yaml
+
+# Sync staging application
+argocd app sync sample-app-staging
+
+# Verify staging deployment
+kubectl get pods -n staging
+kubectl get svc -n staging
+
+# Test staging application
+curl http://localhost:30081
+Task 5: Advanced GitOps Features
+Subtask 5.1: Implement Health Checks and Monitoring
+Configure advanced ArgoCD features for better monitoring.
+
+# Create a custom health check
+cat << EOF > ~/gitops-lab/helm-charts/sample-app/templates/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "sample-app.fullname" . }}-config
+  labels:
+    {{- include "sample-app.labels" . | nindent 4 }}
+data:
+  nginx.conf: |
+    server {
+        listen 80;
+        location / {
+            root /usr/share/nginx/html;
+            index index.html index.htm;
+        }
+        location /health {
+            access_log off;
+            return 200 "healthy\n";
+            add_header Content-Type text/plain;
+        }
+    }
+EOF
+
+# Update deployment to use custom config
+cat << EOF >> ~/gitops-lab/helm-charts/sample-app/templates/deployment.yaml
+          volumeMounts:
+            - name: config-volume
+              mountPath: /etc/nginx/conf.d
+      volumes:
+        - name: config-volume
+          configMap:
+            name: {{ include "sample-app.fullname" . }}-config
+EOF
+Subtask 5.2: Set up Application Rollback
+Demonstrate rollback capabilities in GitOps.
+
+# Check current application history
+argocd app history sample-app
+
+# Create a problematic update
+cd ~/gitops-lab/helm-charts/sample-app
+sed -i 's/tag: "1.22"/tag: "invalid-tag"/' values.yaml
+
+# Commit the change
+cd ~/gitops-lab
+git add .
+git commit -m "Update to invalid image tag (intentional error)"
+
+# Update ArgoCD repository
+sudo cp -r ~/gitops-lab/* /tmp/gitops-lab/
+sudo chown -R 999:999 /tmp/gitops-lab
+
+# Sync and observe failure
+argocd app sync sample-app
+
+# Check application health
+argocd app get sample-app
+
+# Rollback to previous version
+argocd app rollback sample-app
+
+# Verify rollback
+kubectl get pods -l app.kubernetes.io/name=sample-app
+kubectl describe deployment sample-app | grep Image
+Subtask 5.3: Implement Resource Hooks
+Add Helm hooks for advanced deployment control.
+
+# Create a pre-install hook
+cat << EOF > ~/gitops-lab/helm-charts/sample-app/templates/pre-install-job.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "sample-app.fullname" . }}-pre-install
+  labels:
+    {{- include "sample-app.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": hook-succeeded
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: pre-install
+        image: busybox:1.35
+        command: ['sh', '-c', 'echo "Pre-install hook executed"; sleep 10']
+EOF
+
+# Fix the previous image tag issue
+cd ~/gitops-lab/helm-charts/sample-app
+sed -i 's/tag: "invalid-tag"/tag: "1.22"/' values.yaml
+
+# Commit changes
+cd ~/gitops-lab
+git add .
+git commit -m "Add pre-install hook and fix image tag"
+
+# Update ArgoCD repository
+sudo cp -r ~/gitops-lab/* /tmp/gitops-lab/
+sudo chown -R 999:999 /tmp/gitops-lab
+
+# Sync application
+argocd app sync sample-app
+Task 6: Monitoring and Troubleshooting
+Subtask 6.1: Monitor Application Health
+Set up monitoring and health checks for the GitOps workflow.
+
+# Check overall cluster health
+kubectl get nodes
+kubectl get pods --all-namespaces
+
+# Monitor ArgoCD applications
+argocd app list
+
+# Get detailed application status
+argocd app get sample-app --show-params --show-operation
+
+# Check application events
+kubectl get events --sort-by=.metadata.creationTimestamp
+
+# Monitor resource usage
+kubectl top nodes 2>/dev/null || echo "Metrics server not available"
+kubectl top pods 2>/dev/null || echo "Metrics server not available"
+Subtask 6.2: Troubleshooting Common Issues
+Learn to troubleshoot common GitOps issues.
+
+# Check ArgoCD server logs
+kubectl logs -n argocd deployment/argocd-server --tail=50
+
+# Check application controller logs
+kubectl logs -n argocd deployment/argocd-application-controller --tail=50
+
+# Verify repository access
+argocd repo list
+
+# Check application sync status
+argocd app get sample-app --show-operation
+
+# Force refresh application
+argocd app get sample-app --refresh
+
+# Check Helm release status
+helm list --all-namespaces
+
+# Validate Helm chart
+cd ~/gitops-lab/helm-charts/sample-app
+helm lint .
+helm template . --debug
+Subtask 6.3: Performance Optimization
+Optimize the GitOps workflow for better performance.
+
+# Configure ArgoCD for better performance
+kubectl patch configmap argocd-cmd-params-cm -n argocd --patch '{"data":{"application.instanceLabelKey":"argocd.argoproj.io/instance"}}'
+
+# Set resource limits for ArgoCD
+kubectl patch deployment argocd-server -n argocd --patch '{"spec":{"template":{"spec":{"containers":[{"name":"argocd-server","resources":{"limits":{"cpu":"500m","memory":"512Mi"},"requests":{"cpu":"250m","memory":"256Mi"}}}]}}}}'
+
+# Configure application sync timeout
+argocd app set sample-app --sync-option Timeout=300
+
+# Check application resource usage
+kubectl describe deployment sample-app
+Verification and Testing
+Final Verification Steps
+Let's verify that everything is working correctly.
+
+# Verify all applications are healthy
+argocd app list
+
+# Check all pods are running
+kubectl get pods --all-namespaces
+
+# Test application accessibility
+echo "Testing production application:"
+curl -s http://localhost:30080 | head -5
+
+echo "Testing staging application:"
+curl -s http://localhost:30081 | head -5
+
+# Verify GitOps workflow
+echo "Current Git commit:"
+cd ~/gitops-lab && git log --oneline -5
+
+# Check ArgoCD sync status
+argocd app get sample-app | grep -E "(Health Status|Sync Status)"
+argocd app get sample-app-staging | grep -E "(Health Status|Sync Status)"
+
+# Verify Helm releases
+helm list --all-namespaces
+Performance Test
+Test the complete GitOps workflow end-to-end.
+
+# Make a final change to test the complete workflow
+cd ~/gitops-lab/helm-charts/sample-app
+echo "# GitOps workflow test - $(date)" >> values.yaml
+
+# Commit and update
+cd ~/gitops-lab
+git add .
+git commit -m "Final GitOps workflow test"
+
+# Update ArgoCD repository
+sudo cp -r ~/gitops-lab/* /tmp/gitops-lab/
+sudo chown -R 999:999 /tmp/gitops-lab
+
+# Sync and verify
+argocd app sync sample-app
+argocd app wait sample-app --health
+
+echo "GitOps workflow test completed successfully!"
+Cleanup (Optional)
+If you want to clean up the environment:
+
+# Delete ArgoCD applications
+argocd app delete sample-app --yes
+argocd app delete sample-app-staging --yes
+
+# Delete ArgoCD
+kubectl delete namespace argocd
+
+# Delete kind cluster
+kind delete cluster --name=gitops-lab
+
+# Stop any background processes
+pkill -f "kubectl port-forward"
+Troubleshooting Tips
+Common Issues and Solutions
+Issue 1: ArgoCD pods not starting
+
+# Check pod status and logs
+kubectl get pods -n argocd
+kubectl logs -n argocd deployment/argocd-server
+kubectl describe pods -n argocd
+Issue 2: Application not syncing
+
+# Force refresh and sync
+argocd app get sample-app --refresh
+argocd app sync sample-app --force
+Issue 3: Helm chart validation errors
+
+# Validate chart syntax
+cd ~/gitops-lab/helm-charts/sample-app
+helm lint .
+helm template . --debug --dry-run
+Issue 4: Port conflicts
+
+# Check what's using the ports
+sudo netstat -tulpn | grep -E "(8080|30080|30081)"
+# Kill conflicting processes if needed
+sudo pkill -f "port-forward"
+Conclusion
+Congratulations! You have successfully completed Lab 10: Helm and GitOps. In this comprehensive lab, you have:
+
+Key Accomplishments:
+
+Set up a complete GitOps environment using open-source tools including Kubernetes (kind), Helm, and ArgoCD
+Created and managed Helm charts for application packaging and deployment
+Implemented automated deployment pipelines using ArgoCD for continuous delivery
+Established GitOps workflows where Git serves as the single source of truth for application deployments
+Configured multi-environment deployments with production and staging environments
+Implemented advanced features including health checks, rollbacks, and Helm hooks
+Learned monitoring and troubleshooting techniques for GitOps workflows
+Why This Matters:
+
+GitOps represents a paradigm shift in how we deploy and manage applications in Kubernetes environments. By combining Helm's powerful packaging capabilities with ArgoCD's automated synchronization, you've created a robust, scalable deployment pipeline that:
+
+Ensures consistency across environments through declarative configuration
+Provides audit trails through Git history
+Enables easy rollbacks when issues occur
+Reduces manual errors through automation
+Improves security by eliminating direct cluster access for deployments
+Real-World Applications:
+
+The skills you've developed in this lab are directly applicable to:
+
+Enterprise DevOps practices where reliability and auditability are crucial
+Multi-team environments where different teams need to deploy applications safely
+Compliance requirements where change tracking and approval processes are mandatory
+Disaster recovery scenarios where quick, reliable rollbacks are essential
+Next Steps:
+
+To further enhance your GitOps expertise, consider exploring:
+
+Integration with CI/CD pipelines (Jenkins, GitHub Actions, GitLab CI)
+Advanced ArgoCD features like ApplicationSets and Projects
+Multi-cluster deployments and management
+Integration with monitoring and observability tools
+Security scanning and policy enforcement in GitOps workflows
+You now have hands-on experience with one of the most important deployment methodologies in modern cloud-native environments. The GitOps approach you've implemented provides a solid foundation for managing applications at scale while maintaining security, reliability, and operational excellence.

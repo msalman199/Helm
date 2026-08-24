@@ -1,0 +1,681 @@
+Helm Security
+Learning Objectives
+By the end of this lab, students will be able to:
+
+Understand Helm security best practices and common vulnerabilities
+Manage Kubernetes Secrets securely using Helm
+Implement security configurations (security contexts, RBAC, network policies) for Helm charts
+Use Helm hooks and chart tests to validate secure deployment workflows
+Audit deployed Helm releases against a security compliance checklist
+Prerequisites
+Before starting this lab, students should have:
+
+Basic understanding of Kubernetes concepts (pods, services, deployments, namespaces)
+Familiarity with YAML syntax and Helm template syntax ({{ }}, range, with, if)
+Basic knowledge of Linux command line operations
+Understanding of container security concepts (non-root users, capabilities, read-only filesystems)
+Previous experience with Helm basics (installation, charts, releases)
+Lab Environment Setup
+Note: Al Nafi provides Linux-based cloud machines for this lab. Simply click "Start Lab" to access your dedicated Linux machine. The provided machine is bare metal with no pre-installed tools, so you will install all required tools during the lab.
+
+Install the required tools before starting Task 1:
+
+# Update the system
+sudo apt update && sudo apt upgrade -y
+
+# Install curl, wget, gnupg
+sudo apt install -y curl wget gnupg2
+
+# Install Docker
+curl -fsSL https://get.docker.com -o get-docker.sh
+sudo sh get-docker.sh
+sudo usermod -aG docker $USER
+newgrp docker
+
+# Install kubectl
+curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+
+# Install kind (Kubernetes in Docker)
+curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64
+chmod +x ./kind
+sudo mv ./kind /usr/local/bin/kind
+
+# Install Helm
+curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+# Verify installations
+docker --version
+kubectl version --client
+kind --version
+helm version
+Create the cluster that all tasks will use:
+
+cat <<EOF > kind-config.yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+- role: control-plane
+EOF
+
+kind create cluster --config=kind-config.yaml --name helm-security-lab
+
+kubectl cluster-info
+kubectl get nodes
+You should see one node named helm-security-lab-control-plane in Ready status.
+
+Task 1: Build a Secure Helm Chart with Secrets and Security Contexts
+In this task you will scaffold a Helm chart and build all of its templates and values in the correct order so that helm install succeeds on the first try. Unlike a real-world iterative workflow, here you will write the complete values.yaml file up front (Subtask 1.1) before writing any template that references it. This avoids the common mistake of referencing values fields that do not exist yet.
+
+Subtask 1.1: Scaffold the Chart and Define the Complete values.yaml
+# Create a new Helm chart
+helm create secure-app
+cd secure-app
+
+# Remove default templates we will not use, keep the structure
+rm -f templates/tests/test-connection.yaml
+rm -f templates/hpa.yaml templates/ingress.yaml
+
+# Overwrite values.yaml completely with every field the templates in this
+# lab will need. Writing this file first means every template we create
+# afterward can safely reference these fields.
+cat <<'EOF' > values.yaml
+replicaCount: 2
+
+image:
+  repository: nginx
+  pullPolicy: IfNotPresent
+  tag: "alpine"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 3000
+  fsGroup: 2000
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1000
+  capabilities:
+    drop:
+    - ALL
+    add:
+    - NET_BIND_SERVICE
+
+service:
+  type: ClusterIP
+  port: 80
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 250m
+    memory: 256Mi
+
+autoscaling:
+  enabled: false
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+serviceAccount:
+  create: true
+  name: ""
+
+rbac:
+  create: true
+
+networkPolicy:
+  enabled: true
+
+resourceQuota:
+  enabled: true
+  hard:
+    requests.cpu: "1"
+    requests.memory: 1Gi
+    limits.cpu: "2"
+    limits.memory: 2Gi
+    persistentvolumeclaims: "4"
+    pods: "10"
+
+monitoring:
+  enabled: true
+
+# Application secrets (for lab demonstration only; never commit real
+# secrets like this to source control in a production project)
+secrets:
+  database-password: "supersecretpassword"
+  api-key: "my-secret-api-key"
+  jwt-secret: "jwt-signing-secret"
+EOF
+Deliverable: A values.yaml file containing every key listed above. Verify it parses correctly:
+
+helm lint . || true
+cat values.yaml | grep -c "^[a-zA-Z]"
+Expected result: no YAML parsing errors are reported (lint will warn about missing templates referencing icons, which is fine at this stage since templates are not yet created).
+
+Subtask 1.2: Create the Secret Template
+cat <<'EOF' > templates/secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "secure-app.fullname" . }}-secret
+  labels:
+    {{- include "secure-app.labels" . | nindent 4 }}
+type: Opaque
+data:
+  {{- range $key, $value := .Values.secrets }}
+  {{ $key }}: {{ $value | b64enc | quote }}
+  {{- end }}
+EOF
+Deliverable: Render the template standalone to confirm it is syntactically valid before wiring it into a full deployment:
+
+helm template secure-app-release . --show-only templates/secret.yaml
+Expected result: valid YAML output showing a Secret object with three base64-encoded data keys (database-password, api-key, jwt-secret).
+
+Subtask 1.3: Create the Deployment Template Using the Secret
+Because values.yaml already defines podSecurityContext, securityContext, autoscaling, and replicaCount, this deployment template will render successfully.
+
+cat <<'EOF' > templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "secure-app.fullname" . }}
+  labels:
+    {{- include "secure-app.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "secure-app.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "secure-app.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "secure-app.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+      - name: {{ .Chart.Name }}
+        securityContext:
+          {{- toYaml .Values.securityContext | nindent 12 }}
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        env:
+        - name: DATABASE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "secure-app.fullname" . }}-secret
+              key: database-password
+        - name: API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "secure-app.fullname" . }}-secret
+              key: api-key
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "secure-app.fullname" . }}-secret
+              key: jwt-secret
+        ports:
+        - name: http
+          containerPort: 80
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /
+            port: http
+        readinessProbe:
+          httpGet:
+            path: /
+            port: http
+        resources:
+          {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+EOF
+Also add the ServiceAccount name helper, needed by serviceAccountName above:
+
+cat <<'EOF' >> templates/_helpers.tpl
+
+{{/*
+Create the name of the service account to use
+*/}}
+{{- define "secure-app.serviceAccountName" -}}
+{{- if .Values.serviceAccount.create }}
+{{- default (printf "%s-sa" (include "secure-app.fullname" .)) .Values.serviceAccount.name }}
+{{- else }}
+{{- default "default" .Values.serviceAccount.name }}
+{{- end }}
+{{- end }}
+EOF
+Deliverable: Run a full dry-run render of the chart and confirm there are no template errors:
+
+helm template secure-app-release . --namespace secure-apps
+helm lint .
+Expected result: helm lint . reports 0 chart(s) failed, and helm template prints a complete Deployment manifest with image: "nginx:alpine", replicas: 2, and the env block referencing secure-app-release-secure-app-secret.
+
+Task 2: Deploy and Secure the Chart with RBAC and Network Policy
+Subtask 2.1: Add RBAC Template
+Create a dedicated ServiceAccount, Role, and RoleBinding so the workload does not use the default service account.
+
+cat <<'EOF' > templates/rbac.yaml
+{{- if .Values.rbac.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "secure-app.serviceAccountName" . }}
+  labels:
+    {{- include "secure-app.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "secure-app.fullname" . }}-role
+  labels:
+    {{- include "secure-app.labels" . | nindent 4 }}
+rules:
+- apiGroups: [""]
+  resources: ["pods", "services", "endpoints"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "secure-app.fullname" . }}-rolebinding
+  labels:
+    {{- include "secure-app.labels" . | nindent 4 }}
+subjects:
+- kind: ServiceAccount
+  name: {{ include "secure-app.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ include "secure-app.fullname" . }}-role
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}
+EOF
+Subtask 2.2: Add a Network Policy
+cat <<'EOF' > templates/networkpolicy.yaml
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "secure-app.fullname" . }}-netpol
+  labels:
+    {{- include "secure-app.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "secure-app.selectorLabels" . | nindent 6 }}
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: {{ .Release.Namespace }}
+    ports:
+    - protocol: TCP
+      port: 80
+  egress:
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53
+  - to:
+    - namespaceSelector: {}
+    ports:
+    - protocol: TCP
+      port: 443
+{{- end }}
+EOF
+Subtask 2.3: Deploy the Chart
+# Install the chart
+helm install secure-app-release . --namespace secure-apps --create-namespace
+
+# Verify the secret was created
+kubectl get secrets -n secure-apps
+kubectl describe secret secure-app-release-secure-app-secret -n secure-apps
+
+# Check the deployment is using the secrets
+kubectl get deployment -n secure-apps -o yaml | grep -A 15 "env:"
+
+# Verify pods are running
+kubectl get pods -n secure-apps
+kubectl wait --for=condition=Ready pod -l app.kubernetes.io/instance=secure-app-release -n secure-apps --timeout=90s
+
+# Verify RBAC and network policy objects exist
+kubectl get serviceaccounts,roles,rolebindings -n secure-apps
+kubectl get networkpolicies -n secure-apps
+Deliverable: kubectl get pods -n secure-apps shows all pods in Running state with READY 1/1. kubectl get secrets -n secure-apps lists secure-app-release-secure-app-secret of type Opaque. kubectl get networkpolicies -n secure-apps lists secure-app-release-secure-app-netpol.
+
+Task 3: Validate Security with Helm Tests and a Compliance Script
+Subtask 3.1: Add a Helm Chart Test
+The test pod below must be able to demonstrate a read-only root filesystem while still confirming the secret env var is set. To do this correctly, the container security context uses readOnlyRootFilesystem: true on the container, but the test only attempts to write to /tmp, which is backed by an emptyDir volume mounted specifically to allow the write-permission check to run without contradicting the read-only root filesystem requirement.
+
+mkdir -p templates/tests
+
+cat <<'EOF' > templates/tests/security-test.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "{{ include "secure-app.fullname" . }}-security-test"
+  labels:
+    {{- include "secure-app.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+spec:
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 3000
+    fsGroup: 2000
+  containers:
+  - name: security-test
+    image: alpine:latest
+    command:
+    - /bin/sh
+    - -c
+    - |
+      echo "Running security tests..."
+
+      # Test 1: Check if secrets are properly mounted as env vars
+      if [ -n "$DATABASE_PASSWORD" ]; then
+        echo "PASS: Database password environment variable is set"
+      else
+        echo "FAIL: Database password environment variable is missing"
+        exit 1
+      fi
+
+      # Test 2: Verify non-root user
+      if [ "$(id -u)" -ne 0 ]; then
+        echo "PASS: Running as non-root user (uid=$(id -u))"
+      else
+        echo "FAIL: Running as root user"
+        exit 1
+      fi
+
+      # Test 3: Confirm root filesystem is read-only, using the writable
+      # scratch volume mounted at /scratch for the write-permission check
+      if ! touch /root-write-test 2>/dev/null; then
+        echo "PASS: Root filesystem is read-only"
+      else
+        echo "FAIL: Root filesystem is writable"
+        rm -f /root-write-test
+        exit 1
+      fi
+
+      # Test 4: Confirm the writable scratch volume works as expected
+      if touch /scratch/scratch-write-test 2>/dev/null; then
+        echo "PASS: Scratch volume is writable as expected"
+        rm -f /scratch/scratch-write-test
+      else
+        echo "FAIL: Scratch volume should be writable but is not"
+        exit 1
+      fi
+
+      echo "All security tests passed!"
+    env:
+    - name: DATABASE_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: {{ include "secure-app.fullname" . }}-secret
+          key: database-password
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+      runAsUser: 1000
+      capabilities:
+        drop:
+        - ALL
+    volumeMounts:
+    - name: scratch
+      mountPath: /scratch
+  volumes:
+  - name: scratch
+    emptyDir: {}
+EOF
+Upgrade the release so the test hook is registered, then run the test:
+
+helm upgrade secure-app-release . --namespace secure-apps
+helm test secure-app-release --namespace secure-apps --logs
+Deliverable: Output includes PASS: Database password environment variable is set, PASS: Running as non-root user (uid=1000), PASS: Root filesystem is read-only, PASS: Scratch volume is writable as expected, and All security tests passed!. The overall helm test command exits with the message TEST SUITE: ... secure-app-release-secure-app-security-test and phase Succeeded.
+
+Subtask 3.2: Run a Security Validation Script
+cat <<'EOF' > validate-security.sh
+#!/bin/bash
+set -e
+
+echo "Running Helm security validation..."
+
+echo "1. Checking for hardcoded secrets outside of secretKeyRef..."
+if grep -rE "password|secret|key" templates/ --include="*.yaml" | grep -vE "secretKeyRef|valueFrom|secure-app.labels|secure-app.selectorLabels|secure-app.fullname"; then
+    echo "WARNING: Potential hardcoded secrets found!"
+else
+    echo "PASS: No hardcoded secrets detected in templates"
+fi
+
+echo "2. Checking for privileged containers..."
+if grep -r "privileged: true" templates/ --include="*.yaml"; then
+    echo "WARNING: Privileged containers found!"
+else
+    echo "PASS: No privileged containers detected"
+fi
+
+echo "3. Checking for root user usage..."
+if grep -r "runAsUser: 0" templates/ --include="*.yaml"; then
+    echo "WARNING: Containers running as root found!"
+else
+    echo "PASS: No containers running as root"
+fi
+
+echo "4. Checking for security contexts..."
+if grep -rl "securityContext" templates/ --include="*.yaml" > /dev/null; then
+    echo "PASS: Security contexts found"
+else
+    echo "WARNING: No security contexts defined!"
+fi
+
+echo "Security validation complete."
+EOF
+
+chmod +x validate-security.sh
+./validate-security.sh
+Deliverable: All four checks print PASS. If any prints WARNING, review the corresponding template file and correct it before proceeding.
+
+Subtask 3.3: Run a Compliance Check Against the Live Cluster
+cat <<'EOF' > compliance-check.sh
+#!/bin/bash
+
+NAMESPACE="secure-apps"
+RELEASE="secure-app-release"
+
+echo "=== Helm Security Compliance Check ==="
+echo "Checking compliance for release: $RELEASE in namespace: $NAMESPACE"
+echo
+
+echo "1. Checking for non-root user execution..."
+if kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/instance=$RELEASE -o jsonpath='{.items[*].spec.securityContext.runAsUser}' | grep -q "1000"; then
+    echo "   PASS: Containers running as non-root user"
+else
+    echo "   FAIL: Containers may be running as root"
+fi
+
+echo "2. Checking for read-only root filesystem..."
+if kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/instance=$RELEASE -o jsonpath='{.items[*].spec.containers[*].securityContext.readOnlyRootFilesystem}' | grep -q "true"; then
+    echo "   PASS: Read-only root filesystem enabled"
+else
+    echo "   FAIL: Root filesystem is writable"
+fi
+
+echo "3. Checking for privilege escalation prevention..."
+if kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/instance=$RELEASE -o jsonpath='{.items[*].spec.containers[*].securityContext.allowPrivilegeEscalation}' | grep -q "false"; then
+    echo "   PASS: Privilege escalation disabled"
+else
+    echo "   FAIL: Privilege escalation may be allowed"
+fi
+
+echo "4. Checking secrets management..."
+if kubectl get secrets -n "$NAMESPACE" | grep -q "$RELEASE"; then
+    echo "   PASS: Secrets properly managed by Helm"
+else
+    echo "   FAIL: No Helm-managed secrets found"
+fi
+
+echo "5. Checking network policies..."
+if kubectl get networkpolicies -n "$NAMESPACE" | grep -q "$RELEASE"; then
+    echo "   PASS: Network policies configured"
+else
+    echo "   WARNING: No network policies found"
+fi
+
+echo "6. Checking resource limits..."
+if kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/instance=$RELEASE -o jsonpath='{.items[*].spec.containers[*].resources.limits}' | grep -qE "cpu|memory"; then
+    echo "   PASS: Resource limits configured"
+else
+    echo "   FAIL: No resource limits found"
+fi
+
+echo "7. Checking RBAC configuration..."
+if kubectl get serviceaccounts,roles,rolebindings -n "$NAMESPACE" | grep -q "$RELEASE"; then
+    echo "   PASS: RBAC properly configured"
+else
+    echo "   FAIL: RBAC not configured"
+fi
+
+echo
+echo "=== Compliance Check Complete ==="
+EOF
+
+chmod +x compliance-check.sh
+./compliance-check.sh
+Deliverable: All seven checks report PASS (network policy check may report WARNING only if you disabled networkPolicy.enabled earlier, which you did not). A fully passing run confirms the chart built in Task 1 and deployed in Task 2 meets the security baseline.
+
+Task 4: Cleanup and Best Practices Summary
+Subtask 4.1: Clean Up Resources
+# Uninstall the Helm release
+helm uninstall secure-app-release --namespace secure-apps
+
+# Delete the namespace
+kubectl delete namespace secure-apps
+
+# Clean up the kind cluster
+kind delete cluster --name helm-security-lab
+
+# Remove temporary files
+cd ..
+rm -f kind-config.yaml
+Deliverable: kubectl get ns (if a cluster still existed) would no longer list secure-apps; kind get clusters returns no output, confirming the cluster was removed.
+
+Subtask 4.2: Document Security Best Practices
+cat <<'EOF' > helm-security-best-practices.md
+# Helm Security Best Practices
+
+## 1. Secret Management
+- Never hardcode secrets in values.yaml or templates committed to source control
+- Use Kubernetes Secrets with proper RBAC restricting who can read them
+- Consider external secret management systems (Vault, AWS Secrets Manager, Azure Key Vault)
+- Encrypt sensitive values files using the helm-secrets plugin or SOPS
+- Rotate secrets regularly and avoid reusing the same secret across environments
+
+## 2. Container Security
+- Always run containers as non-root users (runAsNonRoot: true)
+- Use read-only root filesystems and mount writable emptyDir volumes only where needed
+- Disable privilege escalation (allowPrivilegeEscalation: false)
+- Drop all unnecessary Linux capabilities and add back only what is required
+- Set seccomp profiles to RuntimeDefault or a custom restricted profile
+
+## 3. RBAC and Access Control
+- Create dedicated service accounts for each application instead of using default
+- Follow the principle of least privilege when defining Role rules
+- Use Role and RoleBinding scoped to a namespace instead of ClusterRole when possible
+- Regularly audit RBAC permissions with kubectl auth can-i and automated tooling
+
+## 4. Network Security
+- Implement NetworkPolicy resources to restrict pod ingress and egress traffic
+- Default-deny all traffic and explicitly allow only required ports and namespaces
+- Use a service mesh (such as Istio or Linkerd) for mutual TLS and advanced traffic policies
+- Monitor ingress and egress traffic patterns to detect anomalies
+- Restrict egress to DNS and required external endpoints only
+
+## 5. Image Security
+- Pin image tags to specific versions or digests rather than using "latest"
+- Scan images for vulnerabilities using tools such as Trivy or Grype before deployment
+- Use minimal base images (distroless or alpine) to reduce attack surface
+- Verify image provenance with signing tools such as Cosign
+- Restrict imagePullPolicy to Always in production to avoid stale cached images
+
+## 6. Helm Repository Management
+- Only add Helm repositories from trusted, verified sources
+- Pin chart versions explicitly instead of always pulling the latest version
+- Review chart templates before installing charts from third-party repositories
+- Use `helm repo update` regularly but validate changelogs before upgrading
+- Maintain an internal chart repository for organization-approved charts
+
+## 7. Supply Chain Security
+- Sign Helm chart packages using `helm package --sign` and verify signatures on install
+- Use provenance files (.prov) to confirm chart integrity
+- Integrate chart linting (`helm lint`) and security scanning into CI/CD pipelines
+- Track chart dependencies and audit subchart sources for vulnerabilities
+- Enforce policy-as-code checks (such as OPA/Gatekeeper or Kyverno) before deployment
+
+## 8. Incident Response
+- Maintain audit logs of all `helm install`, `upgrade`, and `rollback` operations
+- Define a rollback plan using `helm rollback` for quickly reverting insecure releases
+- Establish alerting for privileged containers, root user execution, or missing security contexts
+- Document a runbook for revoking compromised secrets and rotating credentials quickly
+- Practice incident response drills that include Helm release rollback and secret rotation
+EOF
+
+cat helm-security-best-practices.md
+Deliverable: A file helm-security-best-practices.md containing all eight numbered sections, each with complete bullet points and no truncated lines. Running cat helm-security-best-practices.md displays the full document from # Helm Security Best Practices through the end of the Incident Response section.
+
+Expected Outcomes
+A working Helm chart (secure-app) whose templates reference only values that are defined in values.yaml from the start, installing cleanly with helm install on the first attempt
+A deployed release in the secure-apps namespace with verified non-root security contexts, RBAC, network policies, and secret-backed environment variables
+A passing helm test suite and a compliance script that reports PASS on all seven security checks, plus a completed best-practices reference document
+Conclusion
+In this lab you built a complete, security-hardened Helm chart from the ground up, deliberately writing the full values.yaml before any template so that every helm install and helm template invocation succeeded without missing-field errors. You layered in Kubernetes Secrets, pod and container security contexts, RBAC, network policies, and a Helm chart test that correctly reconciles a read-only root filesystem with a writable scratch volume, then validated the whole deployment with both a static template scanner and a live cluster compliance script. Finally, you produced a complete best-practices reference document covering secret management, container hardening, RBAC, network security, image security, repository management, supply chain integrity, and incident response. These skills translate directly to real-world Helm usage: writing values schemas defensively, validating templates before deployment, and continuously auditing running releases are exactly the habits that prevent security misconfigurations from reaching production Kubernetes clusters.
