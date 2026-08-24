@@ -1,0 +1,33 @@
+global:
+  environment: production
+  region: us-west-2
+  monitoring:
+    enabled: true
+
+replicaCount: 3
+
+image:
+  tag: "1.25"
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 250m
+    memory: 256Mi
+
+env:
+  - name: APP_ENV
+    value: "production"
+  - name: LOG_LEVEL
+    value: "warn"
+
+configMap:
+  enabled: true
+  data:
+    app.properties: |
+      app.name=webapp-production
+      log.level=warn
+      database.pool.size=50
+      monitoring.enabled=true

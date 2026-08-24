@@ -1,0 +1,72 @@
+# Default (base) values for webapp-multi-env
+global:
+  environment: development
+  region: us-east-1
+  monitoring:
+    enabled: false
+
+app:
+  name: webapp
+  port: 8080
+
+image:
+  repository: nginx
+  tag: "1.25"
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+ingress:
+  enabled: false
+  className: ""
+  hosts:
+    - host: webapp.local
+      paths:
+        - path: /
+          pathType: Prefix
+
+resources:
+  limits:
+    cpu: 100m
+    memory: 128Mi
+  requests:
+    cpu: 50m
+    memory: 64Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+env:
+  - name: APP_ENV
+    value: "development"
+  - name: LOG_LEVEL
+    value: "debug"
+
+configMap:
+  enabled: true
+  data:
+    app.properties: |
+      app.name=webapp
+      log.level=debug
+      database.pool.size=5
+
+healthCheck:
+  enabled: true
+  livenessProbe:
+    httpGet:
+      path: /
+      port: 8080
+    initialDelaySeconds: 10
+    periodSeconds: 10
+  readinessProbe:
+    httpGet:
+      path: /
+      port: 8080
+    initialDelaySeconds: 5
+    periodSeconds: 5

@@ -1,0 +1,16 @@
+{{- if .Values.configMap.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "webapp-multi-env.fullname" . }}-config
+  labels:
+    {{- include "webapp-multi-env.labels" . | nindent 4 }}
+data:
+  {{- range $key, $value := .Values.configMap.data }}
+  {{ $key }}: |
+{{ $value | indent 4 }}
+  {{- end }}
+  environment: {{ .Values.global.environment | quote }}
+  region: {{ .Values.global.region | default "us-east-1" | quote }}
+  monitoring-enabled: {{ .Values.global.monitoring.enabled | quote }}
+{{- end }}
