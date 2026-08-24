@@ -1,0 +1,76 @@
+apiVersion: v1
+entries:
+  webapp-chart:
+  - apiVersion: v2
+    appVersion: 2.0.1
+    created: "2026-08-23T04:41:00.83547572Z"
+    description: A sample web application for Helm versioning demonstration - Major
+      Update
+    digest: 576961998109ce1c3d47df2f9af8b98c5ad89febec157af65be775de8db6df4f
+    keywords:
+    - web
+    - application
+    - demo
+    - microservice
+    maintainers:
+    - email: student@example.com
+      name: Lab Student
+    name: webapp-chart
+    type: application
+    urls:
+    - webapp-chart-2.0.1.tgz
+    version: 2.0.1
+  - apiVersion: v2
+    appVersion: 2.0.0
+    created: "2026-08-23T04:41:00.834323041Z"
+    description: A sample web application for Helm versioning demonstration - Major
+      Update
+    digest: 734af512bac1874813599034ef9a52f8b692f9bc5f7786dc9bda2f5daf20e5ad
+    keywords:
+    - web
+    - application
+    - demo
+    - microservice
+    maintainers:
+    - email: student@example.com
+      name: Lab Student
+    name: webapp-chart
+    type: application
+    urls:
+    - webapp-chart-2.0.0.tgz
+    version: 2.0.0
+  - apiVersion: v2
+    appVersion: 1.1.0
+    created: "2026-08-23T04:41:00.833432056Z"
+    description: A sample web application for Helm versioning demonstration
+    digest: 028245647b7658d13b1343c2b9dbfbcefa851946fc3ee06091ae7361229af70b
+    keywords:
+    - web
+    - application
+    - demo
+    maintainers:
+    - email: student@example.com
+      name: Lab Student
+    name: webapp-chart
+    type: application
+    urls:
+    - webapp-chart-1.1.0.tgz
+    version: 1.1.0
+  - apiVersion: v2
+    appVersion: 1.0.0
+    created: "2026-08-23T04:41:00.832745784Z"
+    description: A sample web application for Helm versioning demonstration
+    digest: 49a58d343daa107719c559f42dacc0f704238be872e384b4aca2bf5e9e657778
+    keywords:
+    - web
+    - application
+    - demo
+    maintainers:
+    - email: student@example.com
+      name: Lab Student
+    name: webapp-chart
+    type: application
+    urls:
+    - webapp-chart-1.0.0.tgz
+    version: 1.0.0
+generated: "2026-08-23T04:41:00.831453483Z"

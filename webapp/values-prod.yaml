@@ -1,0 +1,27 @@
+replicaCount: 3
+
+image:
+  repository: nginx
+  tag: "1.21"
+
+app:
+  name: "Production Web App"
+  environment: "production"
+  debug: false
+  database:
+    host: "prod-db.example.com"
+    port: 5432
+    name: "webapp_prod"
+
+customLabels:
+  team: "production"
+  project: "helm-lab"
+  tier: "frontend"
+
+resources:
+  limits:
+    cpu: 200m
+    memory: 256Mi
+  requests:
+    cpu: 200m
+    memory: 256Mi

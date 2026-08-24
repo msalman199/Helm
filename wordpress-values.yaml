@@ -1,0 +1,37 @@
+# WordPress configuration
+wordpressUsername: admin
+wordpressPassword: SecurePass123!
+wordpressEmail: admin@example.com
+wordpressBlogName: "My Helm Lab Blog"
+
+# Service configuration
+service:
+  type: NodePort
+  nodePorts:
+    http: 30081
+
+# MySQL configuration
+mysql:
+  auth:
+    rootPassword: RootPass123!
+    database: wordpress
+    username: wordpress
+    password: WordPressPass123!
+
+# Persistence (disabled for lab simplicity)
+persistence:
+  enabled: false
+
+mysql:
+  primary:
+    persistence:
+      enabled: false
+
+# Resource limits
+resources:
+  limits:
+    memory: 512Mi
+    cpu: 300m
+  requests:
+    memory: 256Mi
+    cpu: 150m

@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "webapp.fullname" . }}-config
+  labels:
+    {{- include "webapp.labels" . | nindent 4 }}
+    {{- include "webapp.environmentLabels" . | nindent 4 }}
+    {{- with .Values.customLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+data:
+  app-name: {{ .Values.app.name | quote }}
+  environment: {{ .Values.app.environment | quote }}
+  debug: {{ .Values.app.debug | quote }}
+  database-url: {{ include "webapp.databaseUrl" . | quote }}
+  replica-count: {{ .Values.replicaCount | quote }}

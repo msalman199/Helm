@@ -1,0 +1,45 @@
+# Updated NGINX configuration
+replicaCount: 2
+
+image:
+  tag: "1.25.4"
+
+service:
+  type: NodePort
+  nodePorts:
+    http: 30080
+
+resources:
+  limits:
+    cpu: 300m
+    memory: 512Mi
+  requests:
+    cpu: 150m
+    memory: 256Mi
+
+staticSiteConfigmap: |-
+  <!DOCTYPE html>
+  <html>
+  <head>
+      <title>Updated NGINX - Helm Lab</title>
+      <style>
+          body { font-family: Arial, sans-serif; text-align: center; margin-top: 50px; background-color: #f0f8ff; }
+          h1 { color: #4169E1; }
+          p { color: #333; }
+          .version { background-color: #FFD700; padding: 10px; border-radius: 5px; display: inline-block; }
+      </style>
+  </head>
+  <body>
+      <h1>Updated NGINX Deployment</h1>
+      <p>This NGINX server has been upgraded using Helm!</p>
+      <div class="version">Version: 1.25.4</div>
+      <p>Lab 5: Deploying Kubernetes Apps with Helm - Updated</p>
+  </body>
+  </html>
+
+podSecurityContext:
+  fsGroup: 1001
+
+containerSecurityContext:
+  runAsUser: 1001
+  runAsNonRoot: true

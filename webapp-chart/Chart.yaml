@@ -1,0 +1,14 @@
+apiVersion: v2
+name: webapp-chart
+description: A sample web application for Helm versioning demonstration - Major Update
+type: application
+version: 2.0.1
+appVersion: "2.0.1"
+keywords:
+  - web
+  - application
+  - demo
+  - microservice
+maintainers:
+  - name: Lab Student
+    email: student@example.com
