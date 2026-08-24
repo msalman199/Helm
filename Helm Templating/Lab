@@ -1,0 +1,464 @@
+ Helm Templating
+Lab Objectives
+By the end of this lab, you will be able to:
+
+Understand Helm templating concepts and syntax
+Create and customize Helm templates for Kubernetes resources
+Implement conditionals and loops in Helm charts
+Use Helm values to parameterize deployments and validate rendered output
+Debug and troubleshoot Helm templates and running releases
+Prerequisites
+Before starting this lab, you should have:
+
+Basic understanding of Kubernetes concepts (Pods, Services, Deployments)
+Familiarity with YAML syntax
+Basic command-line experience in Linux
+Understanding of containerization concepts
+This lab uses a local, disposable Kubernetes cluster created with kind, so all work happens in an isolated, self-owned practice environment. No production systems or external clusters are touched.
+
+Required Tools
+Install the following tools before starting. These commands work on a Debian/Ubuntu-based Linux machine; if you are on another distribution, use your package manager's equivalent or the tool's official installation script.
+
+# Docker (container runtime used by kind)
+sudo apt update
+sudo apt install -y docker.io
+sudo systemctl start docker
+sudo systemctl enable docker
+sudo usermod -aG docker $USER
+newgrp docker
+docker --version
+
+# kubectl (Kubernetes CLI)
+curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+chmod +x kubectl
+sudo mv kubectl /usr/local/bin/
+kubectl version --client
+
+# kind (Kubernetes in Docker)
+curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64
+chmod +x ./kind
+sudo mv ./kind /usr/local/bin/kind
+kind version
+
+# Helm
+curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+chmod 700 get_helm.sh
+./get_helm.sh
+helm version
+Create the practice cluster used for the rest of the lab:
+
+cat << 'EOF' > kind-config.yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+- role: control-plane
+EOF
+
+kind create cluster --config=kind-config.yaml --name helm-lab
+
+kubectl cluster-info
+kubectl get nodes
+You should see one node named helm-lab-control-plane in Ready status.
+
+Task 1: Create and Customize a Helm Chart
+Step 1: Scaffold a new chart
+helm create webapp-chart
+ls -la webapp-chart/
+You should see the standard Helm chart layout: Chart.yaml, values.yaml, charts/, and templates/ (containing deployment.yaml, service.yaml, _helpers.tpl, and others).
+
+Step 2: Replace the default deployment template
+Replace the generated deployment template with a version that adds a ConfigMap-driven environment variable block, a health check block, and an optional resource override â all controlled from values.yaml.
+
+cat << 'EOF' > webapp-chart/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "webapp-chart.fullname" . }}
+  labels:
+    {{- include "webapp-chart.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "webapp-chart.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "webapp-chart.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "webapp-chart.serviceAccountName" . }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.targetPort | default 80 }}
+              protocol: TCP
+          {{- if .Values.healthcheck.enabled }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.healthcheck.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.healthcheck.initialDelaySeconds }}
+            periodSeconds: {{ .Values.healthcheck.periodSeconds }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.healthcheck.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.healthcheck.initialDelaySeconds }}
+            periodSeconds: {{ .Values.healthcheck.periodSeconds }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- if .Values.env }}
+          env:
+            {{- range $key, $value := .Values.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+EOF
+Step 3: Add a conditional ConfigMap template
+cat << 'EOF' > webapp-chart/templates/configmap.yaml
+{{- if .Values.config.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "webapp-chart.fullname" . }}-config
+  labels:
+    {{- include "webapp-chart.labels" . | nindent 4 }}
+data:
+  {{- range $key, $value := .Values.config.data }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}
+{{- end }}
+EOF
+Step 4: Update values.yaml
+cat << 'EOF' > webapp-chart/values.yaml
+replicaCount: 1
+
+image:
+  repository: nginx
+  pullPolicy: IfNotPresent
+  tag: "1.21"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 80
+
+resources:
+  limits:
+    cpu: 100m
+    memory: 128Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+autoscaling:
+  enabled: false
+
+nodeSelector: {}
+
+healthcheck:
+  enabled: true
+  path: /
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+env:
+  NODE_ENV: production
+  LOG_LEVEL: info
+
+config:
+  enabled: true
+  data:
+    app.properties: |
+      server.port=8080
+      logging.level=INFO
+EOF
+Deliverable for Task 1: Render the chart and confirm the ConfigMap and environment variables appear correctly:
+
+helm lint ./webapp-chart
+helm template webapp ./webapp-chart --show-only templates/deployment.yaml
+helm template webapp ./webapp-chart --show-only templates/configmap.yaml
+Expected result: helm lint reports 0 chart(s) linted, 0 chart(s) failed. The deployment output shows an env: block with NODE_ENV and LOG_LEVEL, and the configmap output shows an app.properties key with the embedded properties text.
+
+Task 2: Implement Conditionals and Loops
+Step 1: Add environment-aware resource sizing
+Append an environment-based conditional block to the deployment by re-writing the full file (this keeps the file consistent and avoids partial edits). The new version chooses resource requests/limits and a DEBUG flag based on .Values.environment.
+
+cat << 'EOF' > webapp-chart/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "webapp-chart.fullname" . }}
+  labels:
+    {{- include "webapp-chart.labels" . | nindent 4 }}
+    {{- if .Values.environment }}
+    environment: {{ .Values.environment }}
+    {{- end }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "webapp-chart.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "webapp-chart.selectorLabels" . | nindent 8 }}
+        {{- if .Values.environment }}
+        environment: {{ .Values.environment }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "webapp-chart.serviceAccountName" . }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.targetPort | default 80 }}
+              protocol: TCP
+          {{- if .Values.healthcheck.enabled }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.healthcheck.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.healthcheck.initialDelaySeconds }}
+            periodSeconds: {{ .Values.healthcheck.periodSeconds }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.healthcheck.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.healthcheck.initialDelaySeconds }}
+            periodSeconds: {{ .Values.healthcheck.periodSeconds }}
+          {{- end }}
+          {{- if eq .Values.environment "production" }}
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          {{- else if eq .Values.environment "staging" }}
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          {{- else }}
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          {{- end }}
+          env:
+            {{- if eq .Values.environment "production" }}
+            - name: DEBUG
+              value: "false"
+            - name: LOG_LEVEL
+              value: "warn"
+            {{- else }}
+            - name: DEBUG
+              value: "true"
+            - name: LOG_LEVEL
+              value: "debug"
+            {{- end }}
+            {{- range $key, $value := .Values.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+EOF
+Step 2: Add a Service template driven by a loop
+This lets one values list define several named ports on a single service, using range.
+
+cat << 'EOF' > webapp-chart/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "webapp-chart.fullname" . }}
+  labels:
+    {{- include "webapp-chart.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    {{- range .Values.servicePorts }}
+    - port: {{ .port }}
+      targetPort: {{ .targetPort | default .port }}
+      protocol: {{ .protocol | default "TCP" }}
+      name: {{ .name }}
+    {{- end }}
+  selector:
+    {{- include "webapp-chart.selectorLabels" . | nindent 4 }}
+EOF
+Step 3: Update values.yaml with environment and port list
+cat << 'EOF' > webapp-chart/values.yaml
+replicaCount: 1
+environment: development
+
+image:
+  repository: nginx
+  pullPolicy: IfNotPresent
+  tag: "1.21"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 80
+
+servicePorts:
+  - name: http
+    port: 80
+    targetPort: 80
+    protocol: TCP
+  - name: metrics
+    port: 9090
+    targetPort: 9090
+    protocol: TCP
+
+resources:
+  limits:
+    cpu: 100m
+    memory: 128Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+autoscaling:
+  enabled: false
+
+nodeSelector: {}
+
+healthcheck:
+  enabled: true
+  path: /
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+env:
+  NODE_ENV: production
+
+config:
+  enabled: true
+  data:
+    app.properties: |
+      server.port=8080
+      logging.level=INFO
+EOF
+Step 4: Render and compare environments
+helm template webapp ./webapp-chart --set environment=development | grep -A2 "DEBUG"
+helm template webapp ./webapp-chart --set environment=production | grep -A2 "DEBUG"
+helm template webapp ./webapp-chart --show-only templates/service.yaml
+Deliverable for Task 2: The development render shows DEBUG: "true", the production render shows DEBUG: "false" with larger resource limits, and the service template lists both the http (port 80) and metrics (port 9090) ports produced by the range loop.
+
+Task 3: Deploy, Verify, and Troubleshoot the Release
+Step 1: Lint and dry-run validate before installing
+helm lint ./webapp-chart
+helm template webapp ./webapp-chart | kubectl apply --dry-run=client -f -
+Expected result: lint reports no failures, and the dry-run apply reports each resource as created (dry run) with no schema errors.
+
+Step 2: Install the chart onto the kind cluster
+helm install webapp ./webapp-chart --set environment=production
+
+kubectl get pods
+kubectl get services
+kubectl get configmaps
+Expected result: helm install prints STATUS: deployed. kubectl get pods shows one pod for the webapp-chart deployment. It typically starts in ContainerCreating for a few seconds while the nginx image is pulled, then moves to Running with READY 1/1.
+
+Step 3: Verify readiness and troubleshoot if needed
+Wait for the pod to become ready, then confirm:
+
+kubectl rollout status deployment/webapp-webapp-chart --timeout=60s
+kubectl get pods -o wide
+If the pod does not reach Running/1/1 within a reasonable time, use these commands to diagnose the problem before re-checking:
+
+# Shows recent events (e.g. ImagePullBackOff, FailedScheduling, readiness probe failures)
+kubectl describe pod <pod-name>
+
+# Shows application/container stdout and stderr, useful for CrashLoopBackOff
+kubectl logs <pod-name>
+
+# If the container has restarted, view the previous crash's logs
+kubectl logs <pod-name> --previous
+Common causes and what to look for:
+
+ImagePullBackOff or ErrImagePull in kubectl describe pod events: the image name/tag in values.yaml is wrong or unreachable â verify image.repository and image.tag.
+CrashLoopBackOff: check kubectl logs <pod-name> for an application startup error, and confirm the containerPort matches what the process actually listens on.
+Pod stuck in Pending: run kubectl describe pod <pod-name> and check the Events section for scheduling failures (for example, insufficient CPU/memory on the single-node kind cluster) â lower the resources.requests values in values.yaml if needed.
+Step 4: Upgrade the release and confirm the change took effect
+helm upgrade webapp ./webapp-chart --set replicaCount=2 --set environment=staging
+
+kubectl get pods
+kubectl get deployment webapp-webapp-chart -o jsonpath='{.spec.replicas}{"\n"}'
+helm get values webapp
+Expected result: two pods are now listed for the deployment, the jsonpath command prints 2, and helm get values webapp shows replicaCount: 2 and environment: staging as the effective user-supplied values for the release.
+
+Deliverable for Task 3: A running release named webapp with 2 replicas, confirmed through kubectl get pods, kubectl rollout status, and helm get values, along with a demonstrated understanding of kubectl describe pod and kubectl logs as first-line troubleshooting tools.
+
+Expected Outcomes
+A working Helm chart (webapp-chart) with templated Deployment, Service, and ConfigMap resources parameterized entirely through values.yaml
+Demonstrated use of Helm conditionals (if/else/eq) and loops (range) to produce environment-specific and multi-port Kubernetes manifests
+A successfully installed and upgraded Helm release on a local kind cluster, verified with kubectl and helm get values
+Troubleshooting
+Symptom: helm template or helm install fails with a YAML/parse error mentioning a specific line and an unexpected {{ or indentation problem. Diagnostic hint: Run helm template webapp ./webapp-chart --show-only templates/<file>.yaml in isolation to see the exact rendered output around the failing line, and check that every {{- if }} / {{- range }} has a matching {{- end }}.
+
+Symptom: kubectl get pods shows the pod stuck in Pending or ContainerCreating far longer than expected. Diagnostic hint: Run kubectl describe pod <pod-name> and read the Events section at the bottom for the specific scheduling or image-pull reason before making further changes.
+
+Conclusion
+In this lab you built a Helm chart from scratch, extended its default templates with ConfigMaps and conditional logic, and used range loops to generate repeated Kubernetes constructs such as multiple service ports from a single values list. You practiced the full Helm workflow â lint, template, dry-run apply, install, and upgrade â against a real local kind cluster, and learned to verify a release's health and diagnose common failure states with kubectl describe pod, kubectl logs, and helm get values. These skills, chart parameterization, conditional rendering, and systematic troubleshooting, are the core practices needed to build and maintain production-grade Helm charts safely.
+
+Before ending your session, clean up the resources created in this lab:
+
+helm uninstall webapp
+kind delete cluster --name helm-lab
+To continue building on these skills, explore the official Helm documentation on chart hooks and library charts, and practice writing unit tests for templates using the helm-unittest plugin.
