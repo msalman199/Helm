@@ -1,0 +1,739 @@
+ Helm with Prometheus Monitoring
+Lab Objectives
+By the end of this lab, you will be able to:
+
+Install and configure Prometheus to monitor Kubernetes clusters and Helm releases
+Deploy Grafana for visualization of monitoring data
+Set up monitoring dashboards to track Helm deployment metrics
+Configure service discovery for automatic monitoring of Helm-deployed applications
+Create custom alerts for Helm release health monitoring
+Understand the integration between Helm, Prometheus, and Grafana for comprehensive monitoring
+Prerequisites
+Before starting this lab, you should have:
+
+Basic understanding of Kubernetes concepts (pods, services, deployments)
+Familiarity with Helm package manager fundamentals
+Knowledge of YAML configuration files
+Basic Linux command-line experience
+Understanding of monitoring concepts and metrics
+Lab Environment
+Al Nafi provides Linux-based cloud machines for this lab. Simply click Start Lab to access your dedicated environment. The provided Linux machine is bare metal with no pre-installed tools, so you will install all required components during the lab exercises.
+
+Task 1: Environment Setup and Prerequisites Installation
+Subtask 1.1: Install Docker
+First, we need to install Docker to run our containerized applications.
+
+# Update the package index
+sudo apt update
+
+# Install required packages
+sudo apt install -y apt-transport-https ca-certificates curl gnupg lsb-release
+
+# Add Docker's official GPG key
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+
+# Add Docker repository
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# Update package index again
+sudo apt update
+
+# Install Docker
+sudo apt install -y docker-ce docker-ce-cli containerd.io
+
+# Add current user to docker group
+sudo usermod -aG docker $USER
+
+# Start and enable Docker service
+sudo systemctl start docker
+sudo systemctl enable docker
+
+# Verify Docker installation
+docker --version
+Subtask 1.2: Install kubectl
+Install the Kubernetes command-line tool to interact with our cluster.
+
+# Download kubectl
+curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+
+# Make kubectl executable
+chmod +x kubectl
+
+# Move kubectl to system PATH
+sudo mv kubectl /usr/local/bin/
+
+# Verify kubectl installation
+kubectl version --client
+Subtask 1.3: Install kind (Kubernetes in Docker)
+We'll use kind to create a local Kubernetes cluster.
+
+# Download kind
+curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64
+
+# Make kind executable
+chmod +x ./kind
+
+# Move kind to system PATH
+sudo mv ./kind /usr/local/bin/kind
+
+# Verify kind installation
+kind version
+Subtask 1.4: Install Helm
+Install Helm package manager for Kubernetes applications.
+
+# Download Helm installation script
+curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+# Verify Helm installation
+helm version
+Subtask 1.5: Create Kubernetes Cluster
+Create a local Kubernetes cluster using kind.
+
+# Create cluster configuration file
+cat << EOF > kind-config.yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+- role: control-plane
+  kubeadmConfigPatches:
+  - |
+    kind: InitConfiguration
+    nodeRegistration:
+      kubeletExtraArgs:
+        node-labels: "ingress-ready=true"
+  extraPortMappings:
+  - containerPort: 80
+    hostPort: 80
+    protocol: TCP
+  - containerPort: 443
+    hostPort: 443
+    protocol: TCP
+  - containerPort: 30000
+    hostPort: 30000
+    protocol: TCP
+  - containerPort: 30001
+    hostPort: 30001
+    protocol: TCP
+  - containerPort: 30002
+    hostPort: 30002
+    protocol: TCP
+EOF
+
+# Create the cluster
+kind create cluster --config=kind-config.yaml --name monitoring-lab
+
+# Verify cluster is running
+kubectl cluster-info
+kubectl get nodes
+Task 2: Configure Prometheus for Helm Metrics
+Subtask 2.1: Add Prometheus Helm Repository
+Add the official Prometheus community Helm repository.
+
+# Add Prometheus community Helm repository
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+
+# Add stable Helm repository for additional charts
+helm repo add stable https://charts.helm.sh/stable
+
+# Update Helm repositories
+helm repo update
+
+# List available repositories
+helm repo list
+Subtask 2.2: Create Monitoring Namespace
+Create a dedicated namespace for our monitoring stack.
+
+# Create monitoring namespace
+kubectl create namespace monitoring
+
+# Verify namespace creation
+kubectl get namespaces
+Subtask 2.3: Install Prometheus Stack
+Install the complete Prometheus monitoring stack including Grafana.
+
+# Create values file for Prometheus stack configuration
+cat << EOF > prometheus-values.yaml
+prometheus:
+  prometheusSpec:
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    retention: 7d
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 10Gi
+
+grafana:
+  adminPassword: admin123
+  service:
+    type: NodePort
+    nodePort: 30001
+  persistence:
+    enabled: true
+    size: 5Gi
+
+alertmanager:
+  alertmanagerSpec:
+    storage:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 5Gi
+
+kubeStateMetrics:
+  enabled: true
+
+nodeExporter:
+  enabled: true
+
+prometheusOperator:
+  enabled: true
+EOF
+
+# Install Prometheus stack using Helm
+helm install prometheus-stack prometheus-community/kube-prometheus-stack \
+  --namespace monitoring \
+  --values prometheus-values.yaml \
+  --wait
+
+# Verify installation
+kubectl get pods -n monitoring
+kubectl get services -n monitoring
+Subtask 2.4: Configure Prometheus Service
+Expose Prometheus service for external access.
+
+# Create service to expose Prometheus
+cat << EOF > prometheus-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-external
+  namespace: monitoring
+spec:
+  type: NodePort
+  ports:
+  - port: 9090
+    targetPort: 9090
+    nodePort: 30000
+  selector:
+    app.kubernetes.io/name: prometheus
+    prometheus: prometheus-stack-kube-prom-prometheus
+EOF
+
+# Apply the service configuration
+kubectl apply -f prometheus-service.yaml
+
+# Verify service creation
+kubectl get services -n monitoring
+Subtask 2.5: Create Helm Metrics ServiceMonitor
+Create a ServiceMonitor to collect Helm-specific metrics.
+
+# Create ServiceMonitor for Helm metrics
+cat << EOF > helm-servicemonitor.yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: helm-metrics
+  namespace: monitoring
+  labels:
+    app: helm-metrics
+spec:
+  selector:
+    matchLabels:
+      app: helm-exporter
+  endpoints:
+  - port: metrics
+    interval: 30s
+    path: /metrics
+EOF
+
+# Apply the ServiceMonitor
+kubectl apply -f helm-servicemonitor.yaml
+
+# Verify ServiceMonitor creation
+kubectl get servicemonitor -n monitoring
+Task 3: Set Up Monitoring Dashboards in Grafana
+Subtask 3.1: Access Grafana Dashboard
+First, let's access the Grafana web interface.
+
+# Get Grafana service details
+kubectl get services -n monitoring | grep grafana
+
+# Check if Grafana is running
+kubectl get pods -n monitoring | grep grafana
+
+# Get the Grafana admin password (if you didn't set it in values)
+kubectl get secret --namespace monitoring prometheus-stack-grafana -o jsonpath="{.data.admin-password}" | base64 --decode ; echo
+Note: Grafana is accessible at http://localhost:30001 with username admin and password admin123.
+
+Subtask 3.2: Deploy Sample Applications with Helm
+Deploy sample applications to generate metrics for monitoring.
+
+# Add bitnami repository for sample applications
+helm repo add bitnami https://charts.bitnami.com/bitnami
+helm repo update
+
+# Deploy nginx application
+helm install nginx-app bitnami/nginx \
+  --namespace default \
+  --set service.type=NodePort \
+  --set service.nodePorts.http=30002
+
+# Deploy redis application
+helm install redis-app bitnami/redis \
+  --namespace default \
+  --set auth.enabled=false
+
+# Verify deployments
+helm list --all-namespaces
+kubectl get pods
+kubectl get services
+Subtask 3.3: Create Custom Helm Monitoring Dashboard
+Create a custom Grafana dashboard configuration for Helm monitoring.
+
+# Create dashboard configuration
+cat << EOF > helm-dashboard.json
+{
+  "dashboard": {
+    "id": null,
+    "title": "Helm Releases Monitoring",
+    "tags": ["helm", "kubernetes"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Helm Releases Count",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "count(kube_pod_info{created_by_kind=\"ReplicaSet\"})",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+      },
+      {
+        "id": 2,
+        "title": "Pod Status by Helm Release",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "kube_pod_status_phase",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+      }
+    ],
+    "time": {"from": "now-1h", "to": "now"},
+    "refresh": "5s"
+  }
+}
+EOF
+Subtask 3.4: Configure Prometheus Targets
+Verify that Prometheus is discovering and scraping targets correctly.
+
+# Check Prometheus targets
+echo "Access Prometheus at http://localhost:30000"
+echo "Go to Status -> Targets to verify scraping"
+
+# Create a script to check Prometheus metrics
+cat << EOF > check-metrics.sh
+#!/bin/bash
+echo "Checking Prometheus metrics..."
+curl -s http://localhost:30000/api/v1/query?query=up | jq .
+echo ""
+echo "Checking Kubernetes metrics..."
+curl -s http://localhost:30000/api/v1/query?query=kube_pod_info | jq .
+EOF
+
+chmod +x check-metrics.sh
+Subtask 3.5: Create Helm Release Health Alerts
+Create alerting rules for Helm release monitoring.
+
+# Create PrometheusRule for Helm monitoring
+cat << EOF > helm-alerts.yaml
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: helm-alerts
+  namespace: monitoring
+  labels:
+    app: helm-monitoring
+spec:
+  groups:
+  - name: helm.rules
+    rules:
+    - alert: HelmReleaseFailed
+      expr: kube_pod_status_phase{phase="Failed"} > 0
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Helm release pod failed"
+        description: "Pod {{ \$labels.pod }} in namespace {{ \$labels.namespace }} has failed"
+    
+    - alert: HelmReleaseHighMemoryUsage
+      expr: container_memory_usage_bytes / container_spec_memory_limit_bytes > 0.8
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: "High memory usage in Helm release"
+        description: "Container {{ \$labels.container }} is using more than 80% of memory"
+    
+    - alert: HelmReleasePodRestarting
+      expr: rate(kube_pod_container_status_restarts_total[15m]) > 0
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Helm release pod restarting"
+        description: "Pod {{ \$labels.pod }} is restarting frequently"
+EOF
+
+# Apply the alerting rules
+kubectl apply -f helm-alerts.yaml
+
+# Verify PrometheusRule creation
+kubectl get prometheusrule -n monitoring
+Task 4: Advanced Monitoring Configuration
+Subtask 4.1: Create Custom Metrics Exporter
+Create a simple metrics exporter to demonstrate custom monitoring.
+
+# Create a simple Python metrics exporter
+cat << EOF > metrics-exporter.py
+#!/usr/bin/env python3
+from prometheus_client import start_http_server, Summary, Counter, Gauge
+import random
+import time
+
+# Create metrics
+REQUEST_TIME = Summary('request_processing_seconds', 'Time spent processing request')
+REQUEST_COUNT = Counter('requests_total', 'Total requests', ['method', 'endpoint'])
+HELM_RELEASES = Gauge('helm_releases_total', 'Total number of Helm releases')
+
+@REQUEST_TIME.time()
+def process_request(t):
+    time.sleep(t)
+
+if __name__ == '__main__':
+    start_http_server(8000)
+    while True:
+        process_request(random.random())
+        REQUEST_COUNT.labels(method='GET', endpoint='/api').inc()
+        HELM_RELEASES.set(random.randint(1, 10))
+        time.sleep(1)
+EOF
+
+# Create Dockerfile for the exporter
+cat << EOF > Dockerfile
+FROM python:3.9-slim
+RUN pip install prometheus_client
+COPY metrics-exporter.py /app/
+WORKDIR /app
+EXPOSE 8000
+CMD ["python", "metrics-exporter.py"]
+EOF
+
+# Build and run the custom exporter
+docker build -t custom-exporter .
+docker run -d --name custom-exporter -p 8000:8000 custom-exporter
+Subtask 4.2: Configure Service Discovery
+Create service discovery configuration for automatic monitoring.
+
+# Create ServiceMonitor for custom exporter
+cat << EOF > custom-exporter-monitor.yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: custom-exporter
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: custom-exporter
+  endpoints:
+  - port: metrics
+    interval: 15s
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: custom-exporter-service
+  namespace: monitoring
+  labels:
+    app: custom-exporter
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8000
+    targetPort: 8000
+    name: metrics
+  selector:
+    app: custom-exporter
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: custom-exporter
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: custom-exporter
+  template:
+    metadata:
+      labels:
+        app: custom-exporter
+    spec:
+      containers:
+      - name: custom-exporter
+        image: custom-exporter:latest
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 8000
+EOF
+
+# Apply the configuration
+kubectl apply -f custom-exporter-monitor.yaml
+Subtask 4.3: Create Comprehensive Monitoring Dashboard
+Create a comprehensive Grafana dashboard for Helm monitoring.
+
+# Create comprehensive dashboard configuration
+cat << EOF > comprehensive-dashboard.json
+{
+  "dashboard": {
+    "id": null,
+    "title": "Comprehensive Helm Monitoring",
+    "tags": ["helm", "kubernetes", "monitoring"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Total Helm Releases",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "count(count by (namespace) (kube_pod_info))",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0}
+      },
+      {
+        "id": 2,
+        "title": "Running Pods",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "count(kube_pod_status_phase{phase=\"Running\"})",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0}
+      },
+      {
+        "id": 3,
+        "title": "Failed Pods",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "count(kube_pod_status_phase{phase=\"Failed\"})",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0}
+      },
+      {
+        "id": 4,
+        "title": "Pending Pods",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "count(kube_pod_status_phase{phase=\"Pending\"})",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0}
+      },
+      {
+        "id": 5,
+        "title": "Pod Status Over Time",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "kube_pod_status_phase",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4}
+      },
+      {
+        "id": 6,
+        "title": "Memory Usage by Pod",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "container_memory_usage_bytes",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4}
+      }
+    ],
+    "time": {"from": "now-1h", "to": "now"},
+    "refresh": "5s"
+  }
+}
+EOF
+
+echo "Dashboard configuration created. Import this into Grafana manually."
+Task 5: Verification and Testing
+Subtask 5.1: Verify Prometheus Configuration
+Check that Prometheus is properly configured and collecting metrics.
+
+# Check Prometheus pods
+kubectl get pods -n monitoring | grep prometheus
+
+# Check Prometheus configuration
+kubectl exec -n monitoring prometheus-prometheus-stack-kube-prom-prometheus-0 -- cat /etc/prometheus/config_out/prometheus.env.yaml | head -50
+
+# Test Prometheus API
+curl -s http://localhost:30000/api/v1/targets | jq '.data.activeTargets[] | {job: .labels.job, health: .health}'
+Subtask 5.2: Verify Grafana Access and Dashboards
+Test Grafana access and verify dashboard functionality.
+
+# Check Grafana pod status
+kubectl get pods -n monitoring | grep grafana
+
+# Test Grafana API
+curl -s -u admin:admin123 http://localhost:30001/api/health
+
+# List available dashboards
+curl -s -u admin:admin123 http://localhost:30001/api/search | jq '.[].title'
+Subtask 5.3: Test Alerting Rules
+Verify that alerting rules are working correctly.
+
+# Check PrometheusRule status
+kubectl get prometheusrule -n monitoring
+
+# Check alerts in Prometheus
+curl -s http://localhost:30000/api/v1/rules | jq '.data.groups[].rules[] | select(.type=="alerting") | {alert: .name, state: .state}'
+
+# Force an alert by creating a failing pod
+kubectl run failing-pod --image=nonexistent:latest --restart=Never
+
+# Wait and check alerts again
+sleep 60
+curl -s http://localhost:30000/api/v1/alerts | jq '.data.alerts[] | {alertname: .labels.alertname, state: .state}'
+Subtask 5.4: Monitor Helm Operations
+Perform Helm operations and monitor the metrics.
+
+# Upgrade nginx application
+helm upgrade nginx-app bitnami/nginx \
+  --namespace default \
+  --set replicaCount=2
+
+# Check metrics after upgrade
+curl -s http://localhost:30000/api/v1/query?query=kube_pod_info | jq '.data.result | length'
+
+# Rollback the upgrade
+helm rollback nginx-app 1
+
+# List Helm releases with status
+helm list --all-namespaces -o json | jq '.[] | {name: .name, status: .status, revision: .revision}'
+Subtask 5.5: Performance Testing
+Generate load to test monitoring capabilities.
+
+# Create a load testing script
+cat << EOF > load-test.sh
+#!/bin/bash
+echo "Starting load test..."
+for i in {1..100}; do
+  kubectl run load-test-\$i --image=busybox --restart=Never --rm -i --tty -- sleep 10 &
+  if [ \$((i % 10)) -eq 0 ]; then
+    echo "Created \$i pods..."
+    sleep 5
+  fi
+done
+wait
+echo "Load test completed"
+EOF
+
+chmod +x load-test.sh
+
+# Run load test in background
+./load-test.sh &
+
+# Monitor metrics during load test
+watch -n 5 'curl -s http://localhost:30000/api/v1/query?query=kube_pod_info | jq ".data.result | length"'
+Troubleshooting Common Issues
+Issue 1: Prometheus Not Scraping Targets
+# Check ServiceMonitor labels
+kubectl get servicemonitor -n monitoring -o yaml
+
+# Verify Prometheus configuration
+kubectl logs -n monitoring prometheus-prometheus-stack-kube-prom-prometheus-0 | grep -i error
+
+# Check service discovery
+kubectl get endpoints -n monitoring
+Issue 2: Grafana Dashboard Not Loading
+# Check Grafana logs
+kubectl logs -n monitoring deployment/prometheus-stack-grafana
+
+# Verify Grafana service
+kubectl get service -n monitoring prometheus-stack-grafana
+
+# Test Grafana connectivity
+kubectl port-forward -n monitoring service/prometheus-stack-grafana 3000:80
+Issue 3: Missing Metrics
+# Check if metrics are being generated
+kubectl top pods --all-namespaces
+
+# Verify kube-state-metrics
+kubectl get pods -n monitoring | grep kube-state-metrics
+kubectl logs -n monitoring deployment/prometheus-stack-kube-state-metrics
+Cleanup
+When you're finished with the lab, clean up the resources.
+
+# Delete Helm releases
+helm uninstall nginx-app
+helm uninstall redis-app
+helm uninstall prometheus-stack -n monitoring
+
+# Delete namespace
+kubectl delete namespace monitoring
+
+# Delete kind cluster
+kind delete cluster --name monitoring-lab
+
+# Stop and remove Docker containers
+docker stop custom-exporter
+docker rm custom-exporter
+docker rmi custom-exporter
+Conclusion
+In this comprehensive lab, you have successfully:
+
+Installed and configured a complete monitoring stack using Prometheus and Grafana
+Deployed Helm applications and monitored their health and performance metrics
+Created custom dashboards in Grafana to visualize Helm deployment data
+Set up alerting rules to proactively monitor Helm release health
+Implemented service discovery for automatic monitoring of new deployments
+Tested monitoring capabilities under various load conditions
+This monitoring setup provides crucial visibility into your Helm deployments, enabling you to:
+
+Track deployment health and identify issues before they impact users
+Monitor resource usage and optimize application performance
+Set up proactive alerting to respond quickly to problems
+Maintain historical data for capacity planning and trend analysis
+The skills you've learned in this lab are essential for maintaining production Kubernetes environments where Helm is used for application deployment. The combination of Prometheus for metrics collection and Grafana for visualization provides a powerful monitoring solution that scales with your infrastructure needs.
+
+Understanding how to monitor Helm releases effectively ensures that you can maintain high availability and performance for your containerized applications while providing the observability needed for troubleshooting and optimization.
