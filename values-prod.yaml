@@ -1,0 +1,45 @@
+# Production environment values
+replicaCount: 3
+
+image:
+  repository: simple-microservice
+  tag: "v1.0.0"
+  pullPolicy: Always
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 3000
+
+env:
+  - name: NODE_ENV
+    value: "production"
+  - name: LOG_LEVEL
+    value: "warn"
+  - name: DEBUG
+    value: "false"
+
+config:
+  enabled: true
+  data:
+    app.name: "Production Microservice"
+    app.environment: "production"
+    app.debug: "false"
+    app.logLevel: "warn"
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+global:
+  environment: production

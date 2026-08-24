@@ -1,0 +1,32 @@
+# Upgrade values
+replicaCount: 2
+
+image:
+  repository: simple-microservice
+  tag: "v2.0.0"
+  pullPolicy: IfNotPresent
+
+service:
+  type: NodePort
+  port: 80
+  targetPort: 3000
+  nodePort: 30080
+
+env:
+  - name: NODE_ENV
+    value: "development"
+  - name: LOG_LEVEL
+    value: "info"
+  - name: FEATURE_METRICS
+    value: "true"
+
+config:
+  enabled: true
+  data:
+    app.name: "Upgraded Microservice"
+    app.environment: "development"
+    app.version: "2.0.0"
+    app.features: "metrics,health-check"
+
+global:
+  environment: development

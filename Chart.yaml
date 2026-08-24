@@ -1,0 +1,16 @@
+apiVersion: v2
+name: microservice-chart
+description: A custom Helm chart for microservice deployment
+type: application
+version: 0.1.0
+appVersion: "2.0.0"
+keywords:
+  - microservice
+  - web
+  - api
+home: https://github.com/example/microservice
+sources:
+  - https://github.com/example/microservice
+maintainers:
+  - name: Lab Student
+    email: student@example.com

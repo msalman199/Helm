@@ -1,0 +1,92 @@
+# Default values for microservice-chart
+replicaCount: 2
+
+image:
+  repository: simple-microservice
+  pullPolicy: IfNotPresent
+  tag: "v1.0.0"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  fsGroup: 2000
+
+securityContext:
+  capabilities:
+    drop:
+    - ALL
+  readOnlyRootFilesystem: false
+  runAsNonRoot: true
+  runAsUser: 1000
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 3000
+  annotations: {}
+
+# Environment variables
+env:
+  - name: NODE_ENV
+    value: "production"
+  - name: LOG_LEVEL
+    value: "info"
+
+# Health check configuration
+healthCheck:
+  liveness:
+    path: /health
+    initialDelaySeconds: 30
+    periodSeconds: 10
+  readiness:
+    path: /health
+    initialDelaySeconds: 5
+    periodSeconds: 5
+
+# ConfigMap configuration
+config:
+  enabled: true
+  data:
+    app.name: "Custom Microservice"
+    app.environment: "development"
+    app.debug: "false"
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: microservice.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 250m
+    memory: 256Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 100
+  targetCPUUtilizationPercentage: 80
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}

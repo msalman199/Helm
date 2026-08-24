@@ -1,0 +1,24 @@
+apiVersion: v1
+entries:
+  microservice-chart:
+  - apiVersion: v2
+    appVersion: 2.0.0
+    created: "2026-08-24T04:29:11.152135069Z"
+    description: A custom Helm chart for microservice deployment
+    digest: 485e3a53be4cd46486509721f550592e81079fd848ab0098c57a44c558d1a2db
+    home: https://github.com/example/microservice
+    keywords:
+    - microservice
+    - web
+    - api
+    maintainers:
+    - email: student@example.com
+      name: Lab Student
+    name: microservice-chart
+    sources:
+    - https://github.com/example/microservice
+    type: application
+    urls:
+    - https://example.com/charts/microservice-chart-0.1.0.tgz
+    version: 0.1.0
+generated: "2026-08-24T04:29:11.150831441Z"
