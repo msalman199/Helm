@@ -1,0 +1,1049 @@
+Helm Debugging and Troubleshooting
+Lab Objectives
+By the end of this lab, students will be able to:
+
+Use Helm debug commands to diagnose application issues
+Identify and troubleshoot common Helm deployment failures
+Resolve Helm chart configuration problems
+Implement best practices for Helm debugging
+Use Helm testing and validation features
+Analyze Helm release history and rollback failed deployments
+Prerequisites
+Before starting this lab, students should have:
+
+Basic understanding of Kubernetes concepts (pods, services, deployments)
+Familiarity with YAML syntax
+Basic command-line interface experience
+Understanding of containerization concepts
+Previous experience with Helm basics (installation, charts, releases)
+Lab Environment
+Al Nafi provides Linux-based cloud machines for this lab. Simply click Start Lab to access your dedicated Linux machine. The provided machine is bare metal with no pre-installed tools, so you will install all required tools during the lab exercises.
+
+Task 1: Environment Setup and Tool Installation
+Subtask 1.1: Install Required Tools
+First, we need to install Docker, Kubernetes (kind), kubectl, and Helm on our Linux machine.
+
+Step 1: Update the system and install Docker
+
+# Update package manager
+sudo apt update && sudo apt upgrade -y
+
+# Install Docker
+sudo apt install -y docker.io
+sudo systemctl start docker
+sudo systemctl enable docker
+sudo usermod -aG docker $USER
+
+# Verify Docker installation
+docker --version
+Step 2: Install kubectl
+
+# Download kubectl
+curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+
+# Make it executable and move to PATH
+chmod +x kubectl
+sudo mv kubectl /usr/local/bin/
+
+# Verify installation
+kubectl version --client
+Step 3: Install kind (Kubernetes in Docker)
+
+# Download kind
+curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64
+chmod +x ./kind
+sudo mv ./kind /usr/local/bin/kind
+
+# Verify installation
+kind version
+Step 4: Install Helm
+
+# Download and install Helm
+curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+# Verify installation
+helm version
+Subtask 1.2: Create Kubernetes Cluster
+Step 1: Create a kind cluster
+
+# Create cluster configuration
+cat << EOF > kind-config.yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+- role: control-plane
+  kubeadmConfigPatches:
+  - |
+    kind: InitConfiguration
+    nodeRegistration:
+      kubeletExtraArgs:
+        node-labels: "ingress-ready=true"
+  extraPortMappings:
+  - containerPort: 80
+    hostPort: 80
+    protocol: TCP
+  - containerPort: 443
+    hostPort: 443
+    protocol: TCP
+EOF
+
+# Create the cluster
+kind create cluster --config=kind-config.yaml --name=helm-debug-lab
+
+# Verify cluster is running
+kubectl cluster-info
+kubectl get nodes
+Task 2: Create Problematic Helm Charts for Debugging
+Subtask 2.1: Create Charts with Common Issues
+Step 1: Create a chart with configuration errors
+
+# Create a new Helm chart
+helm create problematic-app
+
+# Navigate to the chart directory
+cd problematic-app
+Step 2: Introduce deliberate errors in the chart
+
+# Create a problematic values.yaml
+cat << EOF > values.yaml
+# Problematic configuration
+replicaCount: 3
+
+image:
+  repository: nginx
+  pullPolicy: IfNotPresent
+  tag: "nonexistent-tag"  # This tag doesn't exist
+
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080  # Wrong target port
+
+ingress:
+  enabled: false
+
+resources:
+  limits:
+    cpu: 100m
+    memory: 64Mi  # Too low memory limit
+  requests:
+    cpu: 100m
+    memory: 32Mi
+
+autoscaling:
+  enabled: false
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Invalid configuration
+invalidConfig:
+  - name: "test"
+    value: 123
+    invalidField: true
+EOF
+Step 3: Create a deployment template with errors
+
+# Modify the deployment template
+cat << EOF > templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "problematic-app.fullname" . }}
+  labels:
+    {{- include "problematic-app.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "problematic-app.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "problematic-app.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /health  # This endpoint doesn't exist in nginx
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ready  # This endpoint doesn't exist in nginx
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          env:
+            - name: INVALID_ENV
+              value: {{ .Values.invalidConfig.name }}  # This will cause template error
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+EOF
+Subtask 2.2: Create Additional Problematic Charts
+Step 1: Create a chart with dependency issues
+
+# Go back to parent directory
+cd ..
+
+# Create another problematic chart
+helm create dependency-issues
+
+cd dependency-issues
+
+# Create Chart.yaml with dependency problems
+cat << EOF > Chart.yaml
+apiVersion: v2
+name: dependency-issues
+description: A Helm chart with dependency problems
+type: application
+version: 0.1.0
+appVersion: "1.16.0"
+
+dependencies:
+  - name: nonexistent-chart
+    version: "1.0.0"
+    repository: "https://nonexistent-repo.example.com"
+  - name: redis
+    version: "99.99.99"  # Version that doesn't exist
+    repository: "https://charts.bitnami.com/bitnami"
+EOF
+Step 2: Create a chart with RBAC issues
+
+cd ..
+helm create rbac-issues
+
+cd rbac-issues
+
+# Create problematic RBAC template
+cat << EOF > templates/rbac.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "rbac-issues.fullname" . }}
+  labels:
+    {{- include "rbac-issues.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "rbac-issues.fullname" . }}
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]  # Overly broad permissions
+  verbs: ["*"]
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+- apiGroups: ["nonexistent.api.group"]  # Invalid API group
+  resources: ["*"]
+  verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "rbac-issues.fullname" . }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "rbac-issues.fullname" . }}
+subjects:
+- kind: ServiceAccount
+  name: {{ include "rbac-issues.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+EOF
+Task 3: Use Helm Debug Commands
+Subtask 3.1: Template Debugging
+Step 1: Use helm template for dry-run debugging
+
+# Go to the problematic-app directory
+cd ../problematic-app
+
+# Debug template rendering
+helm template my-app . --debug
+
+# This will show template rendering errors
+# Look for syntax errors and invalid references
+Step 2: Use helm template with specific values
+
+# Test with different values
+helm template my-app . --set image.tag=latest --debug
+
+# Test with values file
+cat << EOF > debug-values.yaml
+image:
+  tag: "latest"
+resources:
+  limits:
+    memory: 256Mi
+  requests:
+    memory: 128Mi
+EOF
+
+helm template my-app . -f debug-values.yaml --debug
+Step 3: Validate chart structure
+
+# Lint the chart to find issues
+helm lint .
+
+# This will show various warnings and errors
+# Pay attention to template syntax, indentation, and missing values
+Subtask 3.2: Installation Debugging
+Step 1: Attempt installation with debug flags
+
+# Try to install with debug and dry-run
+helm install my-problematic-app . --debug --dry-run
+
+# Try actual installation with debug
+helm install my-problematic-app . --debug --wait --timeout=300s
+Step 2: Check installation status
+
+# Check Helm release status
+helm status my-problematic-app
+
+# List all releases
+helm list
+
+# Get release history
+helm history my-problematic-app
+Subtask 3.3: Advanced Debugging Techniques
+Step 1: Use kubectl to investigate issues
+
+# Check pods status
+kubectl get pods -l app.kubernetes.io/instance=my-problematic-app
+
+# Describe problematic pods
+kubectl describe pods -l app.kubernetes.io/instance=my-problematic-app
+
+# Check events
+kubectl get events --sort-by=.metadata.creationTimestamp
+
+# Check logs
+kubectl logs -l app.kubernetes.io/instance=my-problematic-app
+Step 2: Analyze resource creation
+
+# Check all resources created by the release
+kubectl get all -l app.kubernetes.io/instance=my-problematic-app
+
+# Check specific resource types
+kubectl get deployment -l app.kubernetes.io/instance=my-problematic-app -o yaml
+kubectl get service -l app.kubernetes.io/instance=my-problematic-app -o yaml
+Task 4: Troubleshoot Deployment Failures and Resolve Issues
+Subtask 4.1: Fix Image and Configuration Issues
+Step 1: Identify and fix image problems
+
+# The image tag "nonexistent-tag" will cause ImagePullBackOff
+# Let's fix the values.yaml file
+
+cat << EOF > values.yaml
+replicaCount: 2
+
+image:
+  repository: nginx
+  pullPolicy: IfNotPresent
+  tag: "1.21"  # Use a valid tag
+
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 80  # Fix target port
+
+ingress:
+  enabled: false
+
+resources:
+  limits:
+    cpu: 200m
+    memory: 256Mi  # Increase memory limit
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+autoscaling:
+  enabled: false
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+EOF
+Step 2: Fix deployment template issues
+
+# Fix the deployment template
+cat << EOF > templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "problematic-app.fullname" . }}
+  labels:
+    {{- include "problematic-app.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "problematic-app.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "problematic-app.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /  # Use root path for nginx
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /  # Use root path for nginx
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+EOF
+Subtask 4.2: Upgrade and Test the Fixed Chart
+Step 1: Upgrade the problematic release
+
+# First, validate the fixed chart
+helm lint .
+
+# Test template rendering
+helm template my-app . --debug
+
+# Upgrade the release
+helm upgrade my-problematic-app . --debug --wait --timeout=300s
+Step 2: Verify the fix
+
+# Check release status
+helm status my-problematic-app
+
+# Check pods are running
+kubectl get pods -l app.kubernetes.io/instance=my-problematic-app
+
+# Check pod logs
+kubectl logs -l app.kubernetes.io/instance=my-problematic-app
+
+# Test the service
+kubectl port-forward service/my-problematic-app 8080:80 &
+curl http://localhost:8080
+pkill -f "kubectl port-forward"
+Subtask 4.3: Handle Dependency Issues
+Step 1: Fix dependency problems
+
+# Go to dependency-issues chart
+cd ../dependency-issues
+
+# Fix Chart.yaml
+cat << EOF > Chart.yaml
+apiVersion: v2
+name: dependency-issues
+description: A Helm chart with fixed dependencies
+type: application
+version: 0.1.0
+appVersion: "1.16.0"
+
+dependencies:
+  - name: redis
+    version: "18.1.5"  # Use a valid version
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: redis.enabled
+EOF
+
+# Create values to control dependencies
+cat << EOF > values.yaml
+redis:
+  enabled: true
+  auth:
+    enabled: false
+  master:
+    persistence:
+      enabled: false
+
+replicaCount: 1
+
+image:
+  repository: nginx
+  pullPolicy: IfNotPresent
+  tag: "1.21"
+
+service:
+  type: ClusterIP
+  port: 80
+
+resources:
+  limits:
+    cpu: 100m
+    memory: 128Mi
+  requests:
+    cpu: 50m
+    memory: 64Mi
+EOF
+Step 2: Update dependencies
+
+# Add Bitnami repository
+helm repo add bitnami https://charts.bitnami.com/bitnami
+helm repo update
+
+# Update chart dependencies
+helm dependency update
+
+# Verify dependencies
+helm dependency list
+
+# Install the chart
+helm install dependency-test . --debug --wait --timeout=600s
+Subtask 4.4: Debug RBAC Issues
+Step 1: Fix RBAC configuration
+
+# Go to rbac-issues chart
+cd ../rbac-issues
+
+# Create a more appropriate RBAC configuration
+cat << EOF > templates/rbac.yaml
+{{- if .Values.rbac.create -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "rbac-issues.fullname" . }}
+  labels:
+    {{- include "rbac-issues.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: {{ .Release.Namespace }}
+  name: {{ include "rbac-issues.fullname" . }}
+rules:
+- apiGroups: [""]
+  resources: ["configmaps", "secrets"]
+  verbs: ["get", "list"]
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "rbac-issues.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+subjects:
+- kind: ServiceAccount
+  name: {{ include "rbac-issues.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ include "rbac-issues.fullname" . }}
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}
+EOF
+
+# Update values.yaml to control RBAC
+cat << EOF > values.yaml
+rbac:
+  create: true
+
+replicaCount: 1
+
+image:
+  repository: nginx
+  pullPolicy: IfNotPresent
+  tag: "1.21"
+
+service:
+  type: ClusterIP
+  port: 80
+
+resources:
+  limits:
+    cpu: 100m
+    memory: 128Mi
+  requests:
+    cpu: 50m
+    memory: 64Mi
+EOF
+Step 2: Test RBAC fixes
+
+# Validate the chart
+helm lint .
+
+# Test template rendering
+helm template rbac-test . --debug
+
+# Install the chart
+helm install rbac-test . --debug --wait --timeout=300s
+
+# Verify RBAC resources
+kubectl get serviceaccount,role,rolebinding -l app.kubernetes.io/instance=rbac-test
+Task 5: Advanced Debugging Techniques
+Subtask 5.1: Helm Testing
+Step 1: Create test templates
+
+# Go back to problematic-app directory
+cd ../problematic-app
+
+# Create a test template
+mkdir -p templates/tests
+
+cat << EOF > templates/tests/test-connection.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "{{ include "problematic-app.fullname" . }}-test"
+  labels:
+    {{- include "problematic-app.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+spec:
+  restartPolicy: Never
+  containers:
+    - name: wget
+      image: busybox:1.35
+      command: ['wget']
+      args: ['{{ include "problematic-app.fullname" . }}:{{ .Values.service.port }}']
+EOF
+Step 2: Run Helm tests
+
+# Run the test
+helm test my-problematic-app
+
+# Check test results
+kubectl get pods -l app.kubernetes.io/instance=my-problematic-app
+
+# View test logs
+kubectl logs my-problematic-app-test
+Subtask 5.2: Rollback and Recovery
+Step 1: Simulate a bad upgrade
+
+# Create a bad configuration
+cat << EOF > bad-values.yaml
+image:
+  tag: "nonexistent-version"
+resources:
+  limits:
+    memory: "1Mi"  # Extremely low memory
+EOF
+
+# Attempt upgrade with bad values
+helm upgrade my-problematic-app . -f bad-values.yaml --debug
+Step 2: Rollback to previous version
+
+# Check release history
+helm history my-problematic-app
+
+# Rollback to previous revision
+helm rollback my-problematic-app 1
+
+# Verify rollback
+helm status my-problematic-app
+kubectl get pods -l app.kubernetes.io/instance=my-problematic-app
+Subtask 5.3: Debugging with Helm Hooks
+Step 1: Create pre-install hook for debugging
+
+# Create a pre-install hook
+cat << EOF > templates/pre-install-job.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: "{{ include "problematic-app.fullname" . }}-pre-install"
+  labels:
+    {{- include "problematic-app.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  template:
+    metadata:
+      name: "{{ include "problematic-app.fullname" . }}-pre-install"
+      labels:
+        {{- include "problematic-app.labels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: pre-install-job
+        image: busybox:1.35
+        command:
+        - /bin/sh
+        - -c
+        - |
+          echo "Pre-install hook running..."
+          echo "Checking cluster resources..."
+          echo "Pre-install checks completed successfully"
+EOF
+Step 2: Test hooks
+
+# Uninstall current release
+helm uninstall my-problematic-app
+
+# Reinstall to see hooks in action
+helm install my-problematic-app . --debug --wait --timeout=300s
+
+# Check hook execution
+kubectl get jobs -l app.kubernetes.io/instance=my-problematic-app
+Task 6: Monitoring and Logging for Debugging
+Subtask 6.1: Set up Monitoring
+Step 1: Create a monitoring script
+
+# Create a monitoring script
+cat << 'EOF' > monitor-helm-release.sh
+#!/bin/bash
+
+RELEASE_NAME=$1
+NAMESPACE=${2:-default}
+
+if [ -z "$RELEASE_NAME" ]; then
+    echo "Usage: $0 <release-name> [namespace]"
+    exit 1
+fi
+
+echo "=== Helm Release Status ==="
+helm status $RELEASE_NAME -n $NAMESPACE
+
+echo -e "\n=== Kubernetes Resources ==="
+kubectl get all -l app.kubernetes.io/instance=$RELEASE_NAME -n $NAMESPACE
+
+echo -e "\n=== Pod Details ==="
+kubectl describe pods -l app.kubernetes.io/instance=$RELEASE_NAME -n $NAMESPACE
+
+echo -e "\n=== Recent Events ==="
+kubectl get events --sort-by=.metadata.creationTimestamp -n $NAMESPACE | tail -10
+
+echo -e "\n=== Pod Logs ==="
+kubectl logs -l app.kubernetes.io/instance=$RELEASE_NAME -n $NAMESPACE --tail=20
+EOF
+
+chmod +x monitor-helm-release.sh
+Step 2: Use the monitoring script
+
+# Monitor our release
+./monitor-helm-release.sh my-problematic-app
+Subtask 6.2: Create Debugging Checklist
+Step 1: Create a comprehensive debugging checklist
+
+cat << 'EOF' > helm-debug-checklist.md
+# Helm Debugging Checklist
+
+## Pre-Installation Checks
+- [ ] Chart syntax validation (`helm lint`)
+- [ ] Template rendering test (`helm template`)
+- [ ] Values file validation
+- [ ] Dependencies check (`helm dependency list`)
+
+## Installation Issues
+- [ ] Check Helm release status (`helm status`)
+- [ ] Verify Kubernetes resources (`kubectl get all`)
+- [ ] Check pod status and events (`kubectl describe pods`)
+- [ ] Review container logs (`kubectl logs`)
+- [ ] Validate resource quotas and limits
+
+## Common Issues to Check
+- [ ] Image pull errors (ImagePullBackOff)
+- [ ] Resource constraints (CPU/Memory limits)
+- [ ] Configuration errors in templates
+- [ ] RBAC permission issues
+- [ ] Network connectivity problems
+- [ ] Persistent volume issues
+- [ ] Service discovery problems
+
+## Debugging Commands
+```bash
+# Template debugging
+helm template <release> <chart> --debug --dry-run
+
+# Installation debugging
+helm install <release> <chart> --debug --dry-run
+helm install <release> <chart> --debug --wait --timeout=300s
+
+# Status and history
+helm status <release>
+helm history <release>
+
+# Kubernetes debugging
+kubectl get events --sort-by=.metadata.creationTimestamp
+kubectl describe pods -l app.kubernetes.io/instance=<release>
+kubectl logs -l app.kubernetes.io/instance=<release>
+Recovery Actions
+ Rollback to previous version (helm rollback)
+ Upgrade with fixed configuration (helm upgrade)
+ Uninstall and reinstall if necessary
+ Check and update dependencies EOF
+
+## Task 7: Best Practices and Prevention
+
+### Subtask 7.1: Implement Chart Validation
+
+**Step 1: Create a chart validation script**
+
+```bash
+cat << 'EOF' > validate-chart.sh
+#!/bin/bash
+
+CHART_DIR=$1
+
+if [ -z "$CHART_DIR" ]; then
+    echo "Usage: $0 <chart-directory>"
+    exit 1
+fi
+
+echo "=== Validating Helm Chart: $CHART_DIR ==="
+
+# Check if Chart.yaml exists
+if [ ! -f "$CHART_DIR/Chart.yaml" ]; then
+    echo "ERROR: Chart.yaml not found in $CHART_DIR"
+    exit 1
+fi
+
+# Lint the chart
+echo "Running helm lint..."
+helm lint "$CHART_DIR"
+LINT_EXIT_CODE=$?
+
+# Test template rendering
+echo "Testing template rendering..."
+helm template test-release "$CHART_DIR" --debug > /dev/null
+TEMPLATE_EXIT_CODE=$?
+
+# Check for common issues
+echo "Checking for common issues..."
+
+# Check for hardcoded values
+echo "Checking for hardcoded values..."
+grep -r "localhost\|127.0.0.1\|hardcoded" "$CHART_DIR/templates/" && echo "WARNING: Found potential hardcoded values"
+
+# Check for missing resource limits
+echo "Checking for resource limits..."
+if ! grep -r "resources:" "$CHART_DIR/templates/" > /dev/null; then
+    echo "WARNING: No resource limits found in templates"
+fi
+
+# Summary
+echo "=== Validation Summary ==="
+if [ $LINT_EXIT_CODE -eq 0 ] && [ $TEMPLATE_EXIT_CODE -eq 0 ]; then
+    echo "✓ Chart validation passed"
+    exit 0
+else
+    echo "✗ Chart validation failed"
+    exit 1
+fi
+EOF
+
+chmod +x validate-chart.sh
+Step 2: Validate our charts
+
+# Validate the fixed problematic-app chart
+./validate-chart.sh problematic-app
+
+# Validate other charts
+./validate-chart.sh dependency-issues
+./validate-chart.sh rbac-issues
+Subtask 7.2: Create Production-Ready Chart
+Step 1: Create a production-ready chart template
+
+# Create a new production-ready chart
+helm create production-app
+
+cd production-app
+
+# Create comprehensive values.yaml
+cat << EOF > values.yaml
+# Production-ready configuration
+replicaCount: 3
+
+image:
+  repository: nginx
+  pullPolicy: IfNotPresent
+  tag: "1.21"
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  fsGroup: 2000
+
+securityContext:
+  capabilities:
+    drop:
+    - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1000
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: chart-example.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 250m
+    memory: 256Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: 80
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+    - weight: 100
+      podAffinityTerm:
+        labelSelector:
+          matchExpressions:
+          - key: app.kubernetes.io/name
+            operator: In
+            values:
+            - production-app
+        topologyKey: kubernetes.io/hostname
+
+# Monitoring and observability
+monitoring:
+  enabled: true
+  serviceMonitor:
+    enabled: false
+
+# Health checks
+healthChecks:
+  enabled: true
+  livenessProbe:
+    httpGet:
+      path: /
+      port: http
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readinessProbe:
+    httpGet:
+      path: /
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+EOF
+Step 2: Install and test the production-ready chart
+
+# Validate the chart
+helm lint .
+
+# Install with production values
+helm install production-app . --debug --wait --timeout=600s
+
+# Verify deployment
+kubectl get all -l app.kubernetes.io/instance=production-app
+
+# Check HPA (if metrics server was available)
+kubectl get hpa -l app.kubernetes.io/instance=production-app
+
+# Run tests
+helm test production-app
+Cleanup
+Step 1: Clean up all releases
+
+# List all releases
+helm list
+
+# Uninstall all test releases
+helm uninstall my-problematic-app || true
+helm uninstall dependency-test || true
+helm uninstall rbac-test || true
+helm uninstall production-app || true
+
+# Verify cleanup
+helm list
+kubectl get all
+Step 2: Clean up cluster
+
+# Delete the kind cluster
+kind delete cluster --name=helm-debug-lab
+Conclusion
+In this comprehensive lab, you have learned essential Helm debugging and troubleshooting skills that are crucial for managing Kubernetes applications in production environments.
+
+Key accomplishments:
+
+Mastered Helm Debug Commands: You learned to use helm template, helm lint, and various debug flags to identify issues before deployment.
+
+Troubleshot Common Issues: You encountered and resolved typical problems including image pull errors, resource constraints, configuration mistakes, dependency conflicts, and RBAC issues.
+
+Implemented Advanced Debugging: You used Helm hooks, tests, and monitoring techniques to create comprehensive debugging workflows.
+
+Developed Best Practices: You created validation scripts, monitoring tools, and production-ready chart templates that prevent common issues.
+
+Learned Recovery Techniques: You practiced rollback procedures, upgrade strategies, and systematic troubleshooting approaches.
+
+Why this matters:
+
+Production Readiness: These skills are essential for maintaining reliable Kubernetes applications in production environments.
+Faster Problem Resolution: Systematic debugging approaches reduce downtime and improve application reliability.
+Preventive Measures: Validation and testing practices help catch issues before they impact users.
+**Team
