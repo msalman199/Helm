@@ -1,0 +1,888 @@
+Helm and Kubernetes Networking
+Lab Objectives
+By the end of this lab, students will be able to:
+
+Install and configure Helm on a Kubernetes cluster
+Deploy applications using Helm charts with proper networking configuration
+Configure Kubernetes Ingress controllers for external access
+Set up service-to-service communication within Kubernetes
+Create custom Helm charts with networking components
+Implement cross-namespace networking policies
+Troubleshoot common networking issues in Helm deployments
+Prerequisites
+Before starting this lab, students should have:
+
+Basic understanding of Kubernetes concepts (pods, services, deployments)
+Familiarity with YAML configuration files
+Basic Linux command-line knowledge
+Understanding of networking concepts (DNS, load balancing, ingress)
+Experience with containerized applications
+Lab Environment Setup
+Note: Al Nafi provides Linux-based cloud machines for this lab. Simply click "Start Lab" to access your dedicated Linux machine. The provided machine is bare metal with no pre-installed tools, so you will install all required components during the lab.
+
+Task 1: Deploy Services with Helm and Configure Ingress
+Subtask 1.1: Install Required Tools
+First, we need to install Docker, Kubernetes (using kind), kubectl, and Helm on our Linux machine.
+
+Install Docker
+# Update system packages
+sudo apt update && sudo apt upgrade -y
+
+# Install Docker dependencies
+sudo apt install -y apt-transport-https ca-certificates curl gnupg lsb-release
+
+# Add Docker GPG key
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+
+# Add Docker repository
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# Install Docker
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io
+
+# Add current user to docker group
+sudo usermod -aG docker $USER
+
+# Start and enable Docker
+sudo systemctl start docker
+sudo systemctl enable docker
+
+# Apply group changes
+newgrp docker
+Install kubectl
+# Download kubectl
+curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+
+# Make kubectl executable
+chmod +x kubectl
+
+# Move kubectl to PATH
+sudo mv kubectl /usr/local/bin/
+
+# Verify installation
+kubectl version --client
+Install kind (Kubernetes in Docker)
+# Download kind
+curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64
+
+# Make kind executable
+chmod +x ./kind
+
+# Move kind to PATH
+sudo mv ./kind /usr/local/bin/kind
+
+# Verify installation
+kind version
+Install Helm
+# Download Helm installation script
+curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+# Verify Helm installation
+helm version
+Subtask 1.2: Create Kubernetes Cluster with kind
+Create a kind configuration file that enables ingress:
+
+# Create kind configuration file
+cat << EOF > kind-config.yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+- role: control-plane
+  kubeadmConfigPatches:
+  - |
+    kind: InitConfiguration
+    nodeRegistration:
+      kubeletExtraArgs:
+        node-labels: "ingress-ready=true"
+  extraPortMappings:
+  - containerPort: 80
+    hostPort: 80
+    protocol: TCP
+  - containerPort: 443
+    hostPort: 443
+    protocol: TCP
+- role: worker
+- role: worker
+EOF
+
+# Create the cluster
+kind create cluster --config=kind-config.yaml --name=helm-networking-lab
+
+# Verify cluster is running
+kubectl cluster-info --context kind-helm-networking-lab
+Subtask 1.3: Install NGINX Ingress Controller
+# Install NGINX Ingress Controller using kubectl
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
+
+# Wait for ingress controller to be ready
+kubectl wait --namespace ingress-nginx \
+  --for=condition=ready pod \
+  --selector=app.kubernetes.io/component=controller \
+  --timeout=90s
+
+# Verify ingress controller is running
+kubectl get pods -n ingress-nginx
+Subtask 1.4: Create a Simple Web Application Helm Chart
+Create a custom Helm chart for a web application:
+
+# Create a new Helm chart
+helm create webapp-chart
+
+# Navigate to the chart directory
+cd webapp-chart
+
+# Modify the values.yaml file
+cat << EOF > values.yaml
+replicaCount: 2
+
+image:
+  repository: nginx
+  pullPolicy: IfNotPresent
+  tag: "1.21"
+
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+  hosts:
+    - host: webapp.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  limits:
+    cpu: 100m
+    memory: 128Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+autoscaling:
+  enabled: false
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+EOF
+Modify the deployment template to include proper labels:
+
+# Update the deployment template
+cat << EOF > templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "webapp-chart.fullname" . }}
+  labels:
+    {{- include "webapp-chart.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "webapp-chart.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "webapp-chart.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+EOF
+Subtask 1.5: Deploy the Application with Helm
+# Deploy the application
+helm install webapp ./webapp-chart
+
+# Verify the deployment
+kubectl get pods
+kubectl get services
+kubectl get ingress
+
+# Check Helm releases
+helm list
+Subtask 1.6: Configure Local DNS Resolution
+Since we're using a local cluster, we need to configure local DNS resolution:
+
+# Add entry to /etc/hosts for local testing
+echo "127.0.0.1 webapp.local" | sudo tee -a /etc/hosts
+
+# Test the ingress (wait a moment for ingress to be ready)
+sleep 30
+curl -H "Host: webapp.local" http://localhost
+Subtask 1.7: Create a Second Application with Different Path
+Create another application that will be accessible via a different path:
+
+# Go back to parent directory
+cd ..
+
+# Create another Helm chart
+helm create api-chart
+
+cd api-chart
+
+# Modify values.yaml for API service
+cat << EOF > values.yaml
+replicaCount: 1
+
+image:
+  repository: httpd
+  pullPolicy: IfNotPresent
+  tag: "2.4"
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+  hosts:
+    - host: webapp.local
+      paths:
+        - path: /api
+          pathType: Prefix
+  tls: []
+
+resources:
+  limits:
+    cpu: 50m
+    memory: 64Mi
+  requests:
+    cpu: 50m
+    memory: 64Mi
+EOF
+
+# Deploy the API service
+helm install api-service ./
+
+# Verify both services are running
+kubectl get ingress
+Task 2: Set up Helm Charts for Cross-Cluster Networking
+Subtask 2.1: Create Multiple Namespaces
+# Create different namespaces to simulate cross-cluster communication
+kubectl create namespace frontend
+kubectl create namespace backend
+kubectl create namespace database
+
+# List all namespaces
+kubectl get namespaces
+Subtask 2.2: Create a Database Service Helm Chart
+# Go back to parent directory
+cd ..
+
+# Create a database chart
+helm create database-chart
+
+cd database-chart
+
+# Modify values.yaml for database
+cat << EOF > values.yaml
+replicaCount: 1
+
+image:
+  repository: mysql
+  pullPolicy: IfNotPresent
+  tag: "8.0"
+
+nameOverride: ""
+fullnameOverride: "mysql-db"
+
+service:
+  type: ClusterIP
+  port: 3306
+
+env:
+  MYSQL_ROOT_PASSWORD: "rootpassword"
+  MYSQL_DATABASE: "appdb"
+  MYSQL_USER: "appuser"
+  MYSQL_PASSWORD: "apppassword"
+
+resources:
+  limits:
+    cpu: 200m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+persistence:
+  enabled: false
+EOF
+
+# Update deployment template for database
+cat << EOF > templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "database-chart.fullname" . }}
+  labels:
+    {{- include "database-chart.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "database-chart.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "database-chart.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: mysql
+              containerPort: 3306
+              protocol: TCP
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              value: {{ .Values.env.MYSQL_ROOT_PASSWORD | quote }}
+            - name: MYSQL_DATABASE
+              value: {{ .Values.env.MYSQL_DATABASE | quote }}
+            - name: MYSQL_USER
+              value: {{ .Values.env.MYSQL_USER | quote }}
+            - name: MYSQL_PASSWORD
+              value: {{ .Values.env.MYSQL_PASSWORD | quote }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+EOF
+
+# Deploy database to database namespace
+helm install mysql-db ./ --namespace database
+
+# Verify database deployment
+kubectl get pods -n database
+kubectl get services -n database
+Subtask 2.3: Create a Backend Service that Connects to Database
+# Go back to parent directory
+cd ..
+
+# Create backend chart
+helm create backend-chart
+
+cd backend-chart
+
+# Create a simple backend application configuration
+cat << EOF > values.yaml
+replicaCount: 2
+
+image:
+  repository: nginx
+  pullPolicy: IfNotPresent
+  tag: "1.21"
+
+service:
+  type: ClusterIP
+  port: 8080
+
+database:
+  host: "mysql-db.database.svc.cluster.local"
+  port: 3306
+  name: "appdb"
+  user: "appuser"
+  password: "apppassword"
+
+resources:
+  limits:
+    cpu: 100m
+    memory: 128Mi
+  requests:
+    cpu: 50m
+    memory: 64Mi
+EOF
+
+# Create a ConfigMap template for database connection
+cat << EOF > templates/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "backend-chart.fullname" . }}-config
+  labels:
+    {{- include "backend-chart.labels" . | nindent 4 }}
+data:
+  database-host: {{ .Values.database.host | quote }}
+  database-port: {{ .Values.database.port | quote }}
+  database-name: {{ .Values.database.name | quote }}
+  database-user: {{ .Values.database.user | quote }}
+EOF
+
+# Create a Secret template for database password
+cat << EOF > templates/secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "backend-chart.fullname" . }}-secret
+  labels:
+    {{- include "backend-chart.labels" . | nindent 4 }}
+type: Opaque
+data:
+  database-password: {{ .Values.database.password | b64enc }}
+EOF
+
+# Update deployment to use ConfigMap and Secret
+cat << EOF > templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "backend-chart.fullname" . }}
+  labels:
+    {{- include "backend-chart.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "backend-chart.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "backend-chart.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+          env:
+            - name: DB_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "backend-chart.fullname" . }}-config
+                  key: database-host
+            - name: DB_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "backend-chart.fullname" . }}-config
+                  key: database-port
+            - name: DB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "backend-chart.fullname" . }}-config
+                  key: database-name
+            - name: DB_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "backend-chart.fullname" . }}-config
+                  key: database-user
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "backend-chart.fullname" . }}-secret
+                  key: database-password
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+EOF
+
+# Deploy backend to backend namespace
+helm install backend-service ./ --namespace backend
+
+# Verify backend deployment
+kubectl get pods -n backend
+kubectl get configmaps -n backend
+kubectl get secrets -n backend
+Subtask 2.4: Create a Frontend Service
+# Go back to parent directory
+cd ..
+
+# Create frontend chart
+helm create frontend-chart
+
+cd frontend-chart
+
+# Configure frontend values
+cat << EOF > values.yaml
+replicaCount: 2
+
+image:
+  repository: nginx
+  pullPolicy: IfNotPresent
+  tag: "1.21"
+
+service:
+  type: ClusterIP
+  port: 80
+
+backend:
+  host: "backend-service.backend.svc.cluster.local"
+  port: 8080
+
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+  hosts:
+    - host: frontend.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  limits:
+    cpu: 100m
+    memory: 128Mi
+  requests:
+    cpu: 50m
+    memory: 64Mi
+EOF
+
+# Create ConfigMap for backend connection
+cat << EOF > templates/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "frontend-chart.fullname" . }}-config
+  labels:
+    {{- include "frontend-chart.labels" . | nindent 4 }}
+data:
+  backend-host: {{ .Values.backend.host | quote }}
+  backend-port: {{ .Values.backend.port | quote }}
+EOF
+
+# Update deployment template
+cat << EOF > templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "frontend-chart.fullname" . }}
+  labels:
+    {{- include "frontend-chart.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "frontend-chart.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "frontend-chart.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+          env:
+            - name: BACKEND_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "frontend-chart.fullname" . }}-config
+                  key: backend-host
+            - name: BACKEND_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "frontend-chart.fullname" . }}-config
+                  key: backend-port
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+EOF
+
+# Deploy frontend to frontend namespace
+helm install frontend-service ./ --namespace frontend
+
+# Add frontend.local to hosts file
+echo "127.0.0.1 frontend.local" | sudo tee -a /etc/hosts
+
+# Verify frontend deployment
+kubectl get pods -n frontend
+kubectl get ingress -n frontend
+Subtask 2.5: Test Cross-Namespace Communication
+# Test connectivity between services
+# First, let's check if all services are running
+kubectl get pods --all-namespaces
+
+# Test database connectivity from backend namespace
+kubectl run test-db-connection --image=mysql:8.0 --rm -it --restart=Never --namespace=backend -- mysql -h mysql-db.database.svc.cluster.local -u appuser -papppassword -e "SHOW DATABASES;"
+
+# Test backend connectivity from frontend namespace
+kubectl run test-backend-connection --image=curlimages/curl --rm -it --restart=Never --namespace=frontend -- curl -v http://backend-service.backend.svc.cluster.local:8080
+
+# Test frontend access via ingress
+curl -H "Host: frontend.local" http://localhost
+Subtask 2.6: Implement Network Policies
+Create network policies to control traffic between namespaces:
+
+# Go back to parent directory
+cd ..
+
+# Create network policy for database namespace
+cat << EOF > database-network-policy.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: database-network-policy
+  namespace: database
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: backend
+    ports:
+    - protocol: TCP
+      port: 3306
+EOF
+
+# Create network policy for backend namespace
+cat << EOF > backend-network-policy.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backend-network-policy
+  namespace: backend
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: frontend
+    ports:
+    - protocol: TCP
+      port: 8080
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: database
+    ports:
+    - protocol: TCP
+      port: 3306
+  - to: {}
+    ports:
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53
+EOF
+
+# Label namespaces for network policies
+kubectl label namespace backend name=backend
+kubectl label namespace frontend name=frontend
+kubectl label namespace database name=database
+
+# Apply network policies
+kubectl apply -f database-network-policy.yaml
+kubectl apply -f backend-network-policy.yaml
+
+# Verify network policies
+kubectl get networkpolicies --all-namespaces
+Subtask 2.7: Create a Helm Chart for the Complete Stack
+Create an umbrella chart that deploys the entire stack:
+
+# Create umbrella chart
+helm create full-stack-chart
+
+cd full-stack-chart
+
+# Remove default templates
+rm -rf templates/*
+
+# Create values.yaml for umbrella chart
+cat << EOF > values.yaml
+database:
+  enabled: true
+  namespace: database
+  replicaCount: 1
+  image:
+    repository: mysql
+    tag: "8.0"
+  env:
+    MYSQL_ROOT_PASSWORD: "rootpassword"
+    MYSQL_DATABASE: "appdb"
+    MYSQL_USER: "appuser"
+    MYSQL_PASSWORD: "apppassword"
+
+backend:
+  enabled: true
+  namespace: backend
+  replicaCount: 2
+  image:
+    repository: nginx
+    tag: "1.21"
+  database:
+    host: "mysql-db.database.svc.cluster.local"
+    port: 3306
+
+frontend:
+  enabled: true
+  namespace: frontend
+  replicaCount: 2
+  image:
+    repository: nginx
+    tag: "1.21"
+  backend:
+    host: "backend-service.backend.svc.cluster.local"
+    port: 8080
+  ingress:
+    host: "fullstack.local"
+
+networkPolicies:
+  enabled: true
+EOF
+
+# Create Chart.yaml with dependencies
+cat << EOF > Chart.yaml
+apiVersion: v2
+name: full-stack-chart
+description: A complete full-stack application with networking
+type: application
+version: 0.1.0
+appVersion: "1.0"
+
+dependencies:
+- name: database-chart
+  version: "0.1.0"
+  repository: "file://../database-chart"
+  condition: database.enabled
+- name: backend-chart
+  version: "0.1.0"
+  repository: "file://../backend-chart"
+  condition: backend.enabled
+- name: frontend-chart
+  version: "0.1.0"
+  repository: "file://../frontend-chart"
+  condition: frontend.enabled
+EOF
+
+# Update dependencies
+helm dependency update
+
+# Add fullstack.local to hosts file
+echo "127.0.0.1 fullstack.local" | sudo tee -a /etc/hosts
+Verification and Testing
+Test All Components
+# Check all Helm releases
+helm list --all-namespaces
+
+# Check all pods across namespaces
+kubectl get pods --all-namespaces
+
+# Check all services
+kubectl get services --all-namespaces
+
+# Check ingress controllers
+kubectl get ingress --all-namespaces
+
+# Test connectivity
+curl -H "Host: webapp.local" http://localhost
+curl -H "Host: frontend.local" http://localhost
+
+# Check network policies
+kubectl describe networkpolicy -n database
+kubectl describe networkpolicy -n backend
+Troubleshooting Commands
+# Check pod logs
+kubectl logs -n frontend deployment/frontend-service
+kubectl logs -n backend deployment/backend-service
+kubectl logs -n database deployment/mysql-db
+
+# Check service endpoints
+kubectl get endpoints --all-namespaces
+
+# Check DNS resolution
+kubectl run test-dns --image=busybox --rm -it --restart=Never -- nslookup mysql-db.database.svc.cluster.local
+
+# Check ingress controller logs
+kubectl logs -n ingress-nginx deployment/ingress-nginx-controller
+Cleanup
+# Uninstall all Helm releases
+helm uninstall webapp
+helm uninstall api-service
+helm uninstall mysql-db -n database
+helm uninstall backend-service -n backend
+helm uninstall frontend-service -n frontend
+
+# Delete namespaces
+kubectl delete namespace frontend backend database
+
+# Delete network policies
+kubectl delete -f database-network-policy.yaml
+kubectl delete -f backend-network-policy.yaml
+
+# Delete kind cluster
+kind delete cluster --name=helm-networking-lab
+
+# Remove host entries (optional)
+sudo sed -i '/webapp.local/d' /etc/hosts
+sudo sed -i '/frontend.local/d' /etc/hosts
+sudo sed -i '/fullstack.local/d' /etc/hosts
+Key Concepts Covered
+Helm Charts: Package managers for Kubernetes applications that simplify deployment and management.
+
+Kubernetes Networking: Service discovery, DNS resolution, and inter-pod communication within clusters.
+
+Ingress Controllers: Components that manage external access to services in a cluster, typically HTTP/HTTPS.
+
+Network Policies: Kubernetes resources that control traffic flow between pods and namespaces.
+
+Service Mesh: Architecture pattern for handling service-to-service communication in microservices.
+
+Cross-Namespace Communication: Techniques for enabling secure communication between services in different namespaces.
+
+Common Issues and Solutions
+Ingress Not Working: Ensure the ingress controller is properly installed and running. Check that the ingress class is correctly specified.
+
+DNS Resolution Failures: Verify that services are properly created and that DNS names follow the pattern service-name.namespace.svc.cluster.local.
+
+Network Policy Blocking Traffic: Check that network policies allow the required traffic and that namespaces are properly labeled.
+
+Helm Chart Dependencies: Ensure that dependency charts are available and properly referenced in Chart.yaml.
+
+Conclusion
+In this lab, you have successfully:
+
+Deployed a complete Kubernetes cluster using kind
+Installed and configured Helm for package management
+Created multiple Helm charts for different application components
+Configured ingress controllers for external access
+Implemented cross-namespace networking with proper service discovery
+Applied network policies for security
+Tested connectivity between different services and namespaces
+This lab demonstrates how Helm simplifies the deployment and management of complex, multi-tier applications in Kubernetes while maintaining proper networking and security practices. The skills learned here are essential for managing production Kubernetes environments where applications need to communicate securely across different namespaces and clusters.
+
+Understanding Helm and Kubernetes networking is crucial for modern DevOps practices, as it enables teams to deploy scalable, maintainable applications with proper isolation and security controls. These concepts form the foundation for more advanced topics like service mesh implementations and multi-cluster deployments.
