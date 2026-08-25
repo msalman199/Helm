@@ -1,0 +1,906 @@
+Helm in Multi-Cluster Environments
+Lab Objectives
+By the end of this lab, you will be able to:
+
+Set up and configure Helm for managing multiple Kubernetes clusters
+Create and manage multiple Kubernetes clusters on a single machine using kind
+Deploy applications across multiple clusters using Helm
+Understand multi-cluster deployment strategies and best practices
+Manage Helm releases across different cluster contexts
+Implement cross-cluster application deployment workflows
+Prerequisites
+Before starting this lab, you should have:
+
+Basic understanding of Kubernetes concepts (pods, services, deployments)
+Familiarity with YAML configuration files
+Basic command-line interface experience
+Understanding of containerization concepts
+Previous experience with Helm basics (charts, releases, repositories)
+Lab Environment Setup
+Note: Al Nafi provides Linux-based cloud machines for this lab. Simply click "Start Lab" to access your dedicated Linux environment. The provided machine is bare metal with no pre-installed tools, so you will install all required tools during the lab exercises.
+
+Task 1: Set up Helm in a Multi-Cluster Environment
+Subtask 1.1: Install Required Tools
+First, we need to install Docker, kubectl, kind (Kubernetes in Docker), and Helm on our Linux machine.
+
+Step 1: Update the system and install Docker
+
+# Update package list
+sudo apt update
+
+# Install required packages
+sudo apt install -y apt-transport-https ca-certificates curl gnupg lsb-release
+
+# Add Docker's official GPG key
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+
+# Add Docker repository
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# Update package list again
+sudo apt update
+
+# Install Docker
+sudo apt install -y docker-ce docker-ce-cli containerd.io
+
+# Add current user to docker group
+sudo usermod -aG docker $USER
+
+# Start and enable Docker service
+sudo systemctl start docker
+sudo systemctl enable docker
+Step 2: Install kubectl
+
+# Download kubectl
+curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+
+# Make kubectl executable
+chmod +x kubectl
+
+# Move kubectl to PATH
+sudo mv kubectl /usr/local/bin/
+
+# Verify installation
+kubectl version --client
+Step 3: Install kind (Kubernetes in Docker)
+
+# Download kind
+curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64
+
+# Make kind executable
+chmod +x ./kind
+
+# Move kind to PATH
+sudo mv ./kind /usr/local/bin/kind
+
+# Verify installation
+kind version
+Step 4: Install Helm
+
+# Download Helm installation script
+curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+# Verify Helm installation
+helm version
+Step 5: Restart session to apply Docker group changes
+
+# Log out and log back in, or use newgrp
+newgrp docker
+Subtask 1.2: Create Multiple Kubernetes Clusters
+Now we'll create three different Kubernetes clusters to simulate a multi-cluster environment.
+
+Step 1: Create cluster configuration files
+
+Create a configuration file for the production cluster:
+
+cat << EOF > prod-cluster-config.yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: production
+nodes:
+- role: control-plane
+  kubeadmConfigPatches:
+  - |
+    kind: InitConfiguration
+    nodeRegistration:
+      kubeletExtraArgs:
+        node-labels: "environment=production"
+- role: worker
+  kubeadmConfigPatches:
+  - |
+    kind: JoinConfiguration
+    nodeRegistration:
+      kubeletExtraArgs:
+        node-labels: "environment=production"
+EOF
+Create a configuration file for the staging cluster:
+
+cat << EOF > staging-cluster-config.yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: staging
+nodes:
+- role: control-plane
+  kubeadmConfigPatches:
+  - |
+    kind: InitConfiguration
+    nodeRegistration:
+      kubeletExtraArgs:
+        node-labels: "environment=staging"
+- role: worker
+  kubeadmConfigPatches:
+  - |
+    kind: JoinConfiguration
+    nodeRegistration:
+      kubeletExtraArgs:
+        node-labels: "environment=staging"
+EOF
+Create a configuration file for the development cluster:
+
+cat << EOF > dev-cluster-config.yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: development
+nodes:
+- role: control-plane
+  kubeadmConfigPatches:
+  - |
+    kind: InitConfiguration
+    nodeRegistration:
+      kubeletExtraArgs:
+        node-labels: "environment=development"
+EOF
+Step 2: Create the clusters
+
+# Create production cluster
+kind create cluster --config=prod-cluster-config.yaml
+
+# Create staging cluster
+kind create cluster --config=staging-cluster-config.yaml
+
+# Create development cluster
+kind create cluster --config=dev-cluster-config.yaml
+Step 3: Verify cluster creation
+
+# List all kind clusters
+kind get clusters
+
+# Check kubectl contexts
+kubectl config get-contexts
+Subtask 1.3: Configure kubectl for Multi-Cluster Management
+Step 1: Rename contexts for better identification
+
+# Rename contexts to more meaningful names
+kubectl config rename-context kind-production prod-cluster
+kubectl config rename-context kind-staging staging-cluster
+kubectl config rename-context kind-development dev-cluster
+
+# Verify renamed contexts
+kubectl config get-contexts
+Step 2: Test connectivity to all clusters
+
+# Switch to production cluster and check nodes
+kubectl config use-context prod-cluster
+kubectl get nodes -o wide
+
+# Switch to staging cluster and check nodes
+kubectl config use-context staging-cluster
+kubectl get nodes -o wide
+
+# Switch to development cluster and check nodes
+kubectl config use-context dev-cluster
+kubectl get nodes -o wide
+Subtask 1.4: Initialize Helm in Each Cluster
+Step 1: Add common Helm repositories to each cluster
+
+# Switch to production cluster
+kubectl config use-context prod-cluster
+
+# Add Helm repositories
+helm repo add stable https://charts.helm.sh/stable
+helm repo add bitnami https://charts.bitnami.com/bitnami
+helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+
+# Update repositories
+helm repo update
+
+# Switch to staging cluster and repeat
+kubectl config use-context staging-cluster
+helm repo add stable https://charts.helm.sh/stable
+helm repo add bitnami https://charts.bitnami.com/bitnami
+helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+helm repo update
+
+# Switch to development cluster and repeat
+kubectl config use-context dev-cluster
+helm repo add stable https://charts.helm.sh/stable
+helm repo add bitnami https://charts.bitnami.com/bitnami
+helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+helm repo update
+Step 2: Create namespaces for organized deployments
+
+# Create namespaces in production cluster
+kubectl config use-context prod-cluster
+kubectl create namespace web-apps
+kubectl create namespace databases
+kubectl create namespace monitoring
+
+# Create namespaces in staging cluster
+kubectl config use-context staging-cluster
+kubectl create namespace web-apps
+kubectl create namespace databases
+kubectl create namespace monitoring
+
+# Create namespaces in development cluster
+kubectl config use-context dev-cluster
+kubectl create namespace web-apps
+kubectl create namespace databases
+kubectl create namespace monitoring
+Task 2: Deploy Applications Across Multiple Clusters
+Subtask 2.1: Create a Custom Helm Chart for Multi-Cluster Deployment
+Step 1: Create a custom Helm chart
+
+# Create a new Helm chart
+helm create multi-cluster-app
+
+# Navigate to the chart directory
+cd multi-cluster-app
+Step 2: Modify the chart for environment-specific configurations
+
+Edit the values.yaml file to support multiple environments:
+
+cat << EOF > values.yaml
+# Default values for multi-cluster-app
+replicaCount: 1
+
+image:
+  repository: nginx
+  pullPolicy: IfNotPresent
+  tag: "1.21"
+
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: chart-example.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  limits:
+    cpu: 100m
+    memory: 128Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 100
+  targetCPUUtilizationPercentage: 80
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# Environment-specific configurations
+environment:
+  name: "default"
+  config:
+    database_url: "localhost:5432"
+    api_endpoint: "http://localhost:8080"
+    log_level: "info"
+EOF
+Step 3: Create environment-specific values files
+
+Create production values:
+
+cat << EOF > values-prod.yaml
+replicaCount: 3
+
+image:
+  tag: "1.21"
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 200m
+    memory: 256Mi
+
+environment:
+  name: "production"
+  config:
+    database_url: "prod-db:5432"
+    api_endpoint: "https://api.production.com"
+    log_level: "warn"
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+EOF
+Create staging values:
+
+cat << EOF > values-staging.yaml
+replicaCount: 2
+
+image:
+  tag: "1.21"
+
+resources:
+  limits:
+    cpu: 300m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+environment:
+  name: "staging"
+  config:
+    database_url: "staging-db:5432"
+    api_endpoint: "https://api.staging.com"
+    log_level: "debug"
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 80
+EOF
+Create development values:
+
+cat << EOF > values-dev.yaml
+replicaCount: 1
+
+image:
+  tag: "1.21"
+
+resources:
+  limits:
+    cpu: 200m
+    memory: 128Mi
+  requests:
+    cpu: 50m
+    memory: 64Mi
+
+environment:
+  name: "development"
+  config:
+    database_url: "dev-db:5432"
+    api_endpoint: "http://api.development.local"
+    log_level: "debug"
+
+autoscaling:
+  enabled: false
+EOF
+Step 4: Update the deployment template to use environment configurations
+
+cat << EOF > templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "multi-cluster-app.fullname" . }}
+  labels:
+    {{- include "multi-cluster-app.labels" . | nindent 4 }}
+    environment: {{ .Values.environment.name }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "multi-cluster-app.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "multi-cluster-app.selectorLabels" . | nindent 8 }}
+        environment: {{ .Values.environment.name }}
+    spec:
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+          env:
+            - name: ENVIRONMENT
+              value: {{ .Values.environment.name }}
+            - name: DATABASE_URL
+              value: {{ .Values.environment.config.database_url }}
+            - name: API_ENDPOINT
+              value: {{ .Values.environment.config.api_endpoint }}
+            - name: LOG_LEVEL
+              value: {{ .Values.environment.config.log_level }}
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+EOF
+Subtask 2.2: Deploy Applications to Multiple Clusters
+Step 1: Deploy to the development cluster
+
+# Switch to development cluster
+kubectl config use-context dev-cluster
+
+# Deploy the application with development values
+helm install dev-app . -f values-dev.yaml -n web-apps
+
+# Verify deployment
+kubectl get pods -n web-apps
+kubectl get services -n web-apps
+Step 2: Deploy to the staging cluster
+
+# Switch to staging cluster
+kubectl config use-context staging-cluster
+
+# Deploy the application with staging values
+helm install staging-app . -f values-staging.yaml -n web-apps
+
+# Verify deployment
+kubectl get pods -n web-apps
+kubectl get services -n web-apps
+Step 3: Deploy to the production cluster
+
+# Switch to production cluster
+kubectl config use-context prod-cluster
+
+# Deploy the application with production values
+helm install prod-app . -f values-prod.yaml -n web-apps
+
+# Verify deployment
+kubectl get pods -n web-apps
+kubectl get services -n web-apps
+Subtask 2.3: Create Multi-Cluster Deployment Scripts
+Step 1: Create a deployment script for all clusters
+
+cd ..
+cat << 'EOF' > deploy-multi-cluster.sh
+#!/bin/bash
+
+# Multi-cluster deployment script
+CHART_PATH="./multi-cluster-app"
+NAMESPACE="web-apps"
+
+# Function to deploy to a cluster
+deploy_to_cluster() {
+    local context=$1
+    local values_file=$2
+    local release_name=$3
+    
+    echo "Deploying to cluster: $context"
+    kubectl config use-context $context
+    
+    # Check if namespace exists, create if not
+    kubectl get namespace $NAMESPACE >/dev/null 2>&1 || kubectl create namespace $NAMESPACE
+    
+    # Deploy or upgrade the application
+    helm upgrade --install $release_name $CHART_PATH -f $CHART_PATH/$values_file -n $NAMESPACE
+    
+    # Wait for deployment to be ready
+    kubectl rollout status deployment/$release_name-multi-cluster-app -n $NAMESPACE
+    
+    echo "Deployment to $context completed successfully"
+    echo "---"
+}
+
+# Deploy to all clusters
+deploy_to_cluster "dev-cluster" "values-dev.yaml" "dev-app"
+deploy_to_cluster "staging-cluster" "values-staging.yaml" "staging-app"
+deploy_to_cluster "prod-cluster" "values-prod.yaml" "prod-app"
+
+echo "Multi-cluster deployment completed!"
+EOF
+
+# Make the script executable
+chmod +x deploy-multi-cluster.sh
+Step 2: Create a status checking script
+
+cat << 'EOF' > check-multi-cluster-status.sh
+#!/bin/bash
+
+# Multi-cluster status checking script
+NAMESPACE="web-apps"
+
+# Function to check cluster status
+check_cluster_status() {
+    local context=$1
+    local release_name=$2
+    
+    echo "Checking status for cluster: $context"
+    kubectl config use-context $context
+    
+    echo "Helm releases:"
+    helm list -n $NAMESPACE
+    
+    echo "Pods status:"
+    kubectl get pods -n $NAMESPACE -o wide
+    
+    echo "Services:"
+    kubectl get services -n $NAMESPACE
+    
+    echo "Deployment details:"
+    kubectl describe deployment $release_name-multi-cluster-app -n $NAMESPACE | grep -A 5 "Replicas:"
+    
+    echo "---"
+}
+
+# Check all clusters
+check_cluster_status "dev-cluster" "dev-app"
+check_cluster_status "staging-cluster" "staging-app"
+check_cluster_status "prod-cluster" "prod-app"
+EOF
+
+# Make the script executable
+chmod +x check-multi-cluster-status.sh
+Step 3: Run the status checking script
+
+./check-multi-cluster-status.sh
+Subtask 2.4: Implement Cross-Cluster Application Updates
+Step 1: Create an update script for rolling updates across clusters
+
+cat << 'EOF' > update-multi-cluster.sh
+#!/bin/bash
+
+# Multi-cluster update script
+CHART_PATH="./multi-cluster-app"
+NAMESPACE="web-apps"
+NEW_IMAGE_TAG=${1:-"1.22"}
+
+# Function to update application in a cluster
+update_cluster() {
+    local context=$1
+    local values_file=$2
+    local release_name=$3
+    
+    echo "Updating application in cluster: $context to image tag: $NEW_IMAGE_TAG"
+    kubectl config use-context $context
+    
+    # Update the application with new image tag
+    helm upgrade $release_name $CHART_PATH \
+        -f $CHART_PATH/$values_file \
+        --set image.tag=$NEW_IMAGE_TAG \
+        -n $NAMESPACE
+    
+    # Wait for rollout to complete
+    kubectl rollout status deployment/$release_name-multi-cluster-app -n $NAMESPACE
+    
+    echo "Update completed for $context"
+    echo "---"
+}
+
+echo "Starting multi-cluster update to image tag: $NEW_IMAGE_TAG"
+
+# Update clusters in order: dev -> staging -> production
+update_cluster "dev-cluster" "values-dev.yaml" "dev-app"
+echo "Development update completed. Proceeding to staging..."
+
+update_cluster "staging-cluster" "values-staging.yaml" "staging-app"
+echo "Staging update completed. Proceeding to production..."
+
+update_cluster "prod-cluster" "values-prod.yaml" "prod-app"
+
+echo "Multi-cluster update completed successfully!"
+EOF
+
+# Make the script executable
+chmod +x update-multi-cluster.sh
+Step 2: Test the update script
+
+# Update all clusters to nginx version 1.22
+./update-multi-cluster.sh 1.22
+
+# Check the status after update
+./check-multi-cluster-status.sh
+Subtask 2.5: Deploy Additional Applications for Comprehensive Testing
+Step 1: Deploy a database application to all clusters
+
+# Deploy PostgreSQL to development cluster
+kubectl config use-context dev-cluster
+helm install dev-postgres bitnami/postgresql \
+    --set auth.postgresPassword=devpassword \
+    --set primary.persistence.size=1Gi \
+    -n databases
+
+# Deploy PostgreSQL to staging cluster
+kubectl config use-context staging-cluster
+helm install staging-postgres bitnami/postgresql \
+    --set auth.postgresPassword=stagingpassword \
+    --set primary.persistence.size=2Gi \
+    --set primary.resources.requests.memory=256Mi \
+    -n databases
+
+# Deploy PostgreSQL to production cluster
+kubectl config use-context prod-cluster
+helm install prod-postgres bitnami/postgresql \
+    --set auth.postgresPassword=prodpassword \
+    --set primary.persistence.size=5Gi \
+    --set primary.resources.requests.memory=512Mi \
+    --set primary.resources.limits.memory=1Gi \
+    -n databases
+Step 2: Verify database deployments
+
+# Check development cluster
+kubectl config use-context dev-cluster
+kubectl get pods -n databases
+kubectl get pvc -n databases
+
+# Check staging cluster
+kubectl config use-context staging-cluster
+kubectl get pods -n databases
+kubectl get pvc -n databases
+
+# Check production cluster
+kubectl config use-context prod-cluster
+kubectl get pods -n databases
+kubectl get pvc -n databases
+Subtask 2.6: Create Monitoring and Management Tools
+Step 1: Create a comprehensive cluster management script
+
+cat << 'EOF' > manage-clusters.sh
+#!/bin/bash
+
+# Comprehensive cluster management script
+
+show_help() {
+    echo "Usage: $0 [COMMAND] [OPTIONS]"
+    echo ""
+    echo "Commands:"
+    echo "  status      Show status of all clusters"
+    echo "  deploy      Deploy applications to all clusters"
+    echo "  update      Update applications in all clusters"
+    echo "  cleanup     Remove all applications from clusters"
+    echo "  resources   Show resource usage across clusters"
+    echo ""
+    echo "Options:"
+    echo "  --tag TAG   Specify image tag for updates"
+    echo "  --help      Show this help message"
+}
+
+show_cluster_resources() {
+    local context=$1
+    echo "Resource usage for $context:"
+    kubectl config use-context $context
+    kubectl top nodes 2>/dev/null || echo "Metrics server not available"
+    kubectl get pods --all-namespaces -o wide | grep -E "(Running|Pending|Failed)"
+    echo "---"
+}
+
+cleanup_cluster() {
+    local context=$1
+    echo "Cleaning up $context..."
+    kubectl config use-context $context
+    
+    # Remove Helm releases
+    helm uninstall dev-app -n web-apps 2>/dev/null || true
+    helm uninstall staging-app -n web-apps 2>/dev/null || true
+    helm uninstall prod-app -n web-apps 2>/dev/null || true
+    
+    helm uninstall dev-postgres -n databases 2>/dev/null || true
+    helm uninstall staging-postgres -n databases 2>/dev/null || true
+    helm uninstall prod-postgres -n databases 2>/dev/null || true
+    
+    echo "Cleanup completed for $context"
+}
+
+case "$1" in
+    status)
+        ./check-multi-cluster-status.sh
+        ;;
+    deploy)
+        ./deploy-multi-cluster.sh
+        ;;
+    update)
+        TAG=${2:-"1.22"}
+        ./update-multi-cluster.sh $TAG
+        ;;
+    cleanup)
+        cleanup_cluster "dev-cluster"
+        cleanup_cluster "staging-cluster"
+        cleanup_cluster "prod-cluster"
+        ;;
+    resources)
+        show_cluster_resources "dev-cluster"
+        show_cluster_resources "staging-cluster"
+        show_cluster_resources "prod-cluster"
+        ;;
+    --help|help)
+        show_help
+        ;;
+    *)
+        echo "Unknown command: $1"
+        show_help
+        exit 1
+        ;;
+esac
+EOF
+
+# Make the script executable
+chmod +x manage-clusters.sh
+Step 2: Test the management script
+
+# Show help
+./manage-clusters.sh --help
+
+# Check status of all clusters
+./manage-clusters.sh status
+
+# Show resource usage
+./manage-clusters.sh resources
+Verification and Testing
+Step 1: Verify Multi-Cluster Deployments
+# List all Helm releases across clusters
+echo "=== Development Cluster ==="
+kubectl config use-context dev-cluster
+helm list --all-namespaces
+
+echo "=== Staging Cluster ==="
+kubectl config use-context staging-cluster
+helm list --all-namespaces
+
+echo "=== Production Cluster ==="
+kubectl config use-context prod-cluster
+helm list --all-namespaces
+Step 2: Test Application Connectivity
+# Test connectivity to applications in each cluster
+test_app_connectivity() {
+    local context=$1
+    local app_name=$2
+    
+    echo "Testing connectivity in $context..."
+    kubectl config use-context $context
+    
+    # Get service details
+    kubectl get service $app_name-multi-cluster-app -n web-apps
+    
+    # Port forward and test (run in background)
+    kubectl port-forward service/$app_name-multi-cluster-app 8080:80 -n web-apps &
+    PID=$!
+    
+    # Wait a moment for port forward to establish
+    sleep 3
+    
+    # Test connection
+    curl -s http://localhost:8080 | head -n 5 || echo "Connection test failed"
+    
+    # Kill port forward
+    kill $PID 2>/dev/null
+    
+    echo "---"
+}
+
+# Test all clusters
+test_app_connectivity "dev-cluster" "dev-app"
+test_app_connectivity "staging-cluster" "staging-app"
+test_app_connectivity "prod-cluster" "prod-app"
+Step 3: Validate Environment-Specific Configurations
+# Check environment variables in each cluster
+check_env_config() {
+    local context=$1
+    local app_name=$2
+    
+    echo "Checking environment configuration in $context..."
+    kubectl config use-context $context
+    
+    # Get pod name
+    POD_NAME=$(kubectl get pods -n web-apps -l app.kubernetes.io/name=multi-cluster-app -o jsonpath='{.items[0].metadata.name}')
+    
+    if [ ! -z "$POD_NAME" ]; then
+        echo "Environment variables in $POD_NAME:"
+        kubectl exec $POD_NAME -n web-apps -- env | grep -E "(ENVIRONMENT|DATABASE_URL|API_ENDPOINT|LOG_LEVEL)"
+    else
+        echo "No pods found"
+    fi
+    
+    echo "---"
+}
+
+# Check all clusters
+check_env_config "dev-cluster" "dev-app"
+check_env_config "staging-cluster" "staging-app"
+check_env_config "prod-cluster" "prod-app"
+Troubleshooting Common Issues
+Issue 1: Cluster Creation Failures
+If kind cluster creation fails:
+
+# Check Docker status
+sudo systemctl status docker
+
+# Restart Docker if needed
+sudo systemctl restart docker
+
+# Clean up failed clusters
+kind delete clusters --all
+
+# Recreate clusters
+kind create cluster --config=dev-cluster-config.yaml
+Issue 2: Helm Deployment Failures
+If Helm deployments fail:
+
+# Check Helm status
+helm status <release-name> -n <namespace>
+
+# Debug deployment issues
+kubectl describe deployment <deployment-name> -n <namespace>
+
+# Check pod logs
+kubectl logs -l app.kubernetes.io/name=multi-cluster-app -n <namespace>
+Issue 3: Context Switching Issues
+If kubectl context switching fails:
+
+# List available contexts
+kubectl config get-contexts
+
+# Manually set context
+kubectl config use-context <context-name>
+
+# Verify current context
+kubectl config current-context
+Best Practices for Multi-Cluster Helm Management
+1. Environment Separation
+Use different values files for each environment
+Implement proper resource limits and requests
+Use environment-specific configurations
+2. Deployment Strategy
+Deploy to development first, then staging, then production
+Implement proper testing between deployments
+Use automated rollback mechanisms
+3. Security Considerations
+Use different secrets for each environment
+Implement proper RBAC policies
+Secure inter-cluster communications
+4. Monitoring and Observability
+Implement centralized logging
+Monitor resource usage across clusters
+Set up alerting for deployment failures
+Conclusion
+In this lab, you have successfully:
+
+Set up a multi-cluster Kubernetes environment using kind on a single Linux machine, creating development, staging, and production clusters
+Installed and configured Helm across multiple clusters with proper repository management and namespace organization
+Created custom Helm charts with environment-specific configurations using different values files for each cluster
+Deployed applications across multiple clusters with appropriate resource allocation and scaling configurations for each environment
+Implemented automated deployment scripts for managing applications across all clusters simultaneously
+Created management tools for monitoring, updating, and maintaining multi-cluster deployments
+Tested cross-cluster functionality including application updates, connectivity testing, and environment validation
+This multi-cluster setup demonstrates real-world scenarios where organizations need to manage applications across different environments. The skills you've learned include cluster management, environment-specific deployments, automated deployment strategies, and comprehensive monitoring across multiple Kubernetes clusters.
+
+Understanding multi-cluster Helm management is crucial for modern DevOps practices, enabling you to implement proper CI/CD pipelines, maintain environment consistency, and scale applications across different infrastructure tiers. These techniques are essential for production-ready Kubernetes deployments in enterprise environments.
+
+The automation scripts and management tools you've created provide a foundation for building more sophisticated multi-cluster deployment pipelines and can be extended to include additional features like automated testing, security scanning, and compliance checking across your cluster fleet.
