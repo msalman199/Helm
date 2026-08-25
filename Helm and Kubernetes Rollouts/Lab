@@ -1,0 +1,794 @@
+Helm and Kubernetes Rollouts
+Lab Objectives
+By the end of this lab, you will be able to:
+
+Install and configure Helm on a Kubernetes cluster
+Create Helm charts for application deployment
+Implement canary deployments using Helm
+Execute blue-green deployment strategies
+Perform rolling updates with Helm
+Execute rollback operations when deployments fail
+Monitor deployment status and health checks
+Understand progressive delivery patterns in Kubernetes
+Prerequisites
+Before starting this lab, you should have:
+
+Basic understanding of Kubernetes concepts (pods, services, deployments)
+Familiarity with YAML configuration files
+Basic Linux command-line knowledge
+Understanding of containerization concepts
+Knowledge of kubectl commands
+Lab Environment
+Al Nafi provides Linux-based cloud machines for this lab. Simply click Start Lab to access your dedicated environment. The provided Linux machine is bare metal with no pre-installed tools, so you will install all required tools during the lab exercises.
+
+Task 1: Set up Helm for Canary and Blue-Green Deployments
+Subtask 1.1: Install Required Tools
+First, we need to install Docker, Kubernetes (using kind), kubectl, and Helm on our Linux machine.
+
+Install Docker
+# Update package index
+sudo apt update
+
+# Install required packages
+sudo apt install -y apt-transport-https ca-certificates curl gnupg lsb-release
+
+# Add Docker's official GPG key
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+
+# Set up Docker repository
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# Install Docker
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io
+
+# Add current user to docker group
+sudo usermod -aG docker $USER
+
+# Start and enable Docker
+sudo systemctl start docker
+sudo systemctl enable docker
+
+# Apply group changes
+newgrp docker
+Install kubectl
+# Download kubectl
+curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+
+# Make kubectl executable
+chmod +x kubectl
+
+# Move kubectl to PATH
+sudo mv kubectl /usr/local/bin/
+
+# Verify installation
+kubectl version --client
+Install kind (Kubernetes in Docker)
+# Download kind
+curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64
+
+# Make kind executable
+chmod +x ./kind
+
+# Move kind to PATH
+sudo mv ./kind /usr/local/bin/kind
+
+# Verify installation
+kind version
+Install Helm
+# Download Helm installation script
+curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+# Verify Helm installation
+helm version
+Subtask 1.2: Create Kubernetes Cluster
+Create a local Kubernetes cluster using kind:
+
+# Create kind cluster configuration
+cat << EOF > kind-config.yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+- role: control-plane
+  kubeadmConfigPatches:
+  - |
+    kind: InitConfiguration
+    nodeRegistration:
+      kubeletExtraArgs:
+        node-labels: "ingress-ready=true"
+  extraPortMappings:
+  - containerPort: 80
+    hostPort: 80
+    protocol: TCP
+  - containerPort: 443
+    hostPort: 443
+    protocol: TCP
+- role: worker
+- role: worker
+EOF
+
+# Create the cluster
+kind create cluster --config=kind-config.yaml --name=helm-lab
+
+# Verify cluster is running
+kubectl cluster-info --context kind-helm-lab
+
+# Check nodes
+kubectl get nodes
+Subtask 1.3: Install NGINX Ingress Controller
+# Install NGINX Ingress Controller
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
+
+# Wait for ingress controller to be ready
+kubectl wait --namespace ingress-nginx \
+  --for=condition=ready pod \
+  --selector=app.kubernetes.io/component=controller \
+  --timeout=90s
+
+# Verify ingress controller
+kubectl get pods -n ingress-nginx
+Subtask 1.4: Create Sample Application
+Create a simple web application for our deployment experiments:
+
+# Create application directory
+mkdir -p ~/helm-lab/sample-app
+
+# Create Dockerfile
+cat << 'EOF' > ~/helm-lab/sample-app/Dockerfile
+FROM nginx:alpine
+COPY index.html /usr/share/nginx/html/
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
+EOF
+
+# Create version 1 of the application
+cat << 'EOF' > ~/helm-lab/sample-app/index.html
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Sample App</title>
+    <style>
+        body { font-family: Arial, sans-serif; text-align: center; padding: 50px; background-color: #e3f2fd; }
+        h1 { color: #1976d2; }
+    </style>
+</head>
+<body>
+    <h1>Sample Application - Version 1.0</h1>
+    <p>This is the initial version of our application</p>
+    <p>Deployment Strategy: Initial Release</p>
+</body>
+</html>
+EOF
+
+# Build and load the image into kind
+cd ~/helm-lab/sample-app
+docker build -t sample-app:v1.0 .
+kind load docker-image sample-app:v1.0 --name=helm-lab
+
+# Create version 2 for later use
+cat << 'EOF' > index-v2.html
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Sample App</title>
+    <style>
+        body { font-family: Arial, sans-serif; text-align: center; padding: 50px; background-color: #e8f5e8; }
+        h1 { color: #388e3c; }
+    </style>
+</head>
+<body>
+    <h1>Sample Application - Version 2.0</h1>
+    <p>This is the updated version of our application</p>
+    <p>Deployment Strategy: Canary/Blue-Green</p>
+    <p>New Feature: Enhanced UI and Performance</p>
+</body>
+</html>
+EOF
+
+# Build version 2
+cp index-v2.html index.html
+docker build -t sample-app:v2.0 .
+kind load docker-image sample-app:v2.0 --name=helm-lab
+Subtask 1.5: Create Base Helm Chart
+Create a Helm chart for our sample application:
+
+# Create Helm chart
+cd ~/helm-lab
+helm create sample-app-chart
+
+# Navigate to chart directory
+cd sample-app-chart
+
+# Update Chart.yaml
+cat << 'EOF' > Chart.yaml
+apiVersion: v2
+name: sample-app-chart
+description: A Helm chart for sample application with deployment strategies
+type: application
+version: 0.1.0
+appVersion: "1.0"
+EOF
+
+# Update values.yaml for our application
+cat << 'EOF' > values.yaml
+replicaCount: 3
+
+image:
+  repository: sample-app
+  pullPolicy: Never
+  tag: "v1.0"
+
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations: {}
+  hosts:
+    - host: sample-app.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  limits:
+    cpu: 100m
+    memory: 128Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+autoscaling:
+  enabled: false
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Deployment strategy configuration
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 1
+    maxSurge: 1
+
+# Canary deployment settings
+canary:
+  enabled: false
+  weight: 10
+  
+# Blue-Green deployment settings
+blueGreen:
+  enabled: false
+EOF
+
+# Update deployment template
+cat << 'EOF' > templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "sample-app-chart.fullname" . }}
+  labels:
+    {{- include "sample-app-chart.labels" . | nindent 4 }}
+    version: {{ .Values.image.tag }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  strategy:
+    type: {{ .Values.strategy.type }}
+    {{- if eq .Values.strategy.type "RollingUpdate" }}
+    rollingUpdate:
+      maxUnavailable: {{ .Values.strategy.rollingUpdate.maxUnavailable }}
+      maxSurge: {{ .Values.strategy.rollingUpdate.maxSurge }}
+    {{- end }}
+  selector:
+    matchLabels:
+      {{- include "sample-app-chart.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "sample-app-chart.selectorLabels" . | nindent 8 }}
+        version: {{ .Values.image.tag }}
+    spec:
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+EOF
+Task 2: Implement Rolling Updates and Rollback Strategies
+Subtask 2.1: Deploy Initial Version
+Deploy the initial version of our application:
+
+# Install the initial version
+helm install sample-app ./sample-app-chart
+
+# Check deployment status
+kubectl get deployments
+kubectl get pods
+kubectl get services
+
+# Check rollout status
+kubectl rollout status deployment/sample-app-sample-app-chart
+
+# Add entry to /etc/hosts for local testing
+echo "127.0.0.1 sample-app.local" | sudo tee -a /etc/hosts
+
+# Test the application
+curl -H "Host: sample-app.local" http://localhost/
+Subtask 2.2: Implement Rolling Update
+Perform a rolling update to version 2.0:
+
+# Update the application to version 2.0
+helm upgrade sample-app ./sample-app-chart --set image.tag=v2.0
+
+# Watch the rolling update in real-time
+kubectl rollout status deployment/sample-app-sample-app-chart --watch
+
+# Check pods during update
+kubectl get pods -w
+In another terminal, monitor the application availability:
+
+# Monitor application during update
+while true; do
+  curl -s -H "Host: sample-app.local" http://localhost/ | grep -o "Version [0-9.]*" || echo "Connection failed"
+  sleep 2
+done
+Subtask 2.3: Check Rollout History
+# View rollout history
+kubectl rollout history deployment/sample-app-sample-app-chart
+
+# View specific revision details
+kubectl rollout history deployment/sample-app-sample-app-chart --revision=1
+kubectl rollout history deployment/sample-app-sample-app-chart --revision=2
+
+# Check Helm release history
+helm history sample-app
+Subtask 2.4: Implement Rollback Strategy
+Simulate a problematic deployment and perform rollback:
+
+# Create a problematic version (version 3.0 with wrong image)
+helm upgrade sample-app ./sample-app-chart --set image.tag=v3.0-nonexistent
+
+# Check deployment status (should show issues)
+kubectl get pods
+kubectl rollout status deployment/sample-app-sample-app-chart
+
+# Rollback using kubectl
+kubectl rollout undo deployment/sample-app-sample-app-chart
+
+# Alternative: Rollback using Helm
+helm rollback sample-app 2
+
+# Verify rollback
+kubectl get pods
+curl -H "Host: sample-app.local" http://localhost/
+Subtask 2.5: Implement Canary Deployment
+Create a canary deployment setup:
+
+# Create canary values file
+cat << 'EOF' > canary-values.yaml
+replicaCount: 1
+
+image:
+  repository: sample-app
+  pullPolicy: Never
+  tag: "v2.0"
+
+nameOverride: "canary"
+fullnameOverride: "sample-app-canary"
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    nginx.ingress.kubernetes.io/canary: "true"
+    nginx.ingress.kubernetes.io/canary-weight: "10"
+  hosts:
+    - host: sample-app.local
+      paths:
+        - path: /
+          pathType: Prefix
+
+canary:
+  enabled: true
+  weight: 10
+EOF
+
+# First, ensure main app is on v1.0
+helm upgrade sample-app ./sample-app-chart --set image.tag=v1.0
+
+# Deploy canary version
+helm install sample-app-canary ./sample-app-chart -f canary-values.yaml
+
+# Check both deployments
+kubectl get deployments
+kubectl get pods -l app.kubernetes.io/name=sample-app-chart
+
+# Test canary deployment (run multiple times to see traffic split)
+for i in {1..20}; do
+  curl -s -H "Host: sample-app.local" http://localhost/ | grep -o "Version [0-9.]*"
+  sleep 1
+done
+Subtask 2.6: Promote Canary Deployment
+After validating the canary deployment, promote it to full production:
+
+# Increase canary traffic to 50%
+helm upgrade sample-app-canary ./sample-app-chart -f canary-values.yaml \
+  --set ingress.annotations."nginx\.ingress\.kubernetes\.io/canary-weight"=50
+
+# Test traffic distribution
+for i in {1..20}; do
+  curl -s -H "Host: sample-app.local" http://localhost/ | grep -o "Version [0-9.]*"
+  sleep 1
+done
+
+# Promote canary to full production
+helm upgrade sample-app ./sample-app-chart --set image.tag=v2.0
+
+# Remove canary deployment
+helm uninstall sample-app-canary
+
+# Verify full promotion
+kubectl get deployments
+curl -H "Host: sample-app.local" http://localhost/
+Subtask 2.7: Implement Blue-Green Deployment
+Create a blue-green deployment strategy:
+
+# Create blue-green values for green environment
+cat << 'EOF' > green-values.yaml
+replicaCount: 3
+
+image:
+  repository: sample-app
+  pullPolicy: Never
+  tag: "v2.0"
+
+nameOverride: "green"
+fullnameOverride: "sample-app-green"
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: false
+
+blueGreen:
+  enabled: true
+  environment: "green"
+EOF
+
+# Deploy green environment (v2.0)
+helm install sample-app-green ./sample-app-chart -f green-values.yaml
+
+# Check both environments
+kubectl get deployments
+kubectl get services
+
+# Test green environment directly
+kubectl port-forward service/sample-app-green 8080:80 &
+PORT_FORWARD_PID=$!
+
+# Test green environment
+curl http://localhost:8080/
+
+# Kill port-forward
+kill $PORT_FORWARD_PID
+Subtask 2.8: Switch Traffic in Blue-Green Deployment
+# Create a script to switch traffic
+cat << 'EOF' > switch-traffic.sh
+#!/bin/bash
+
+ENVIRONMENT=$1
+
+if [ "$ENVIRONMENT" = "blue" ]; then
+    kubectl patch ingress sample-app-sample-app-chart -p '{"spec":{"rules":[{"host":"sample-app.local","http":{"paths":[{"path":"/","pathType":"Prefix","backend":{"service":{"name":"sample-app-sample-app-chart","port":{"number":80}}}}]}}]}}'
+    echo "Traffic switched to BLUE environment"
+elif [ "$ENVIRONMENT" = "green" ]; then
+    kubectl patch ingress sample-app-sample-app-chart -p '{"spec":{"rules":[{"host":"sample-app.local","http":{"paths":[{"path":"/","pathType":"Prefix","backend":{"service":{"name":"sample-app-green","port":{"number":80}}}}]}}]}}'
+    echo "Traffic switched to GREEN environment"
+else
+    echo "Usage: $0 [blue|green]"
+    exit 1
+fi
+EOF
+
+chmod +x switch-traffic.sh
+
+# Switch to green environment
+./switch-traffic.sh green
+
+# Test the switch
+curl -H "Host: sample-app.local" http://localhost/
+
+# Switch back to blue if needed
+./switch-traffic.sh blue
+curl -H "Host: sample-app.local" http://localhost/
+Subtask 2.9: Advanced Rollout Monitoring
+Create monitoring and health check scripts:
+
+# Create deployment monitoring script
+cat << 'EOF' > monitor-deployment.sh
+#!/bin/bash
+
+DEPLOYMENT_NAME=$1
+NAMESPACE=${2:-default}
+
+if [ -z "$DEPLOYMENT_NAME" ]; then
+    echo "Usage: $0 <deployment-name> [namespace]"
+    exit 1
+fi
+
+echo "Monitoring deployment: $DEPLOYMENT_NAME in namespace: $NAMESPACE"
+echo "=================================================="
+
+# Monitor rollout status
+kubectl rollout status deployment/$DEPLOYMENT_NAME -n $NAMESPACE --timeout=300s
+
+# Check final status
+echo -e "\nFinal Deployment Status:"
+kubectl get deployment $DEPLOYMENT_NAME -n $NAMESPACE
+
+echo -e "\nPod Status:"
+kubectl get pods -l app.kubernetes.io/name=$(echo $DEPLOYMENT_NAME | cut -d'-' -f1) -n $NAMESPACE
+
+echo -e "\nRollout History:"
+kubectl rollout history deployment/$DEPLOYMENT_NAME -n $NAMESPACE
+EOF
+
+chmod +x monitor-deployment.sh
+
+# Create health check script
+cat << 'EOF' > health-check.sh
+#!/bin/bash
+
+URL=$1
+EXPECTED_VERSION=$2
+MAX_ATTEMPTS=${3:-30}
+DELAY=${4:-2}
+
+if [ -z "$URL" ] || [ -z "$EXPECTED_VERSION" ]; then
+    echo "Usage: $0 <url> <expected-version> [max-attempts] [delay]"
+    exit 1
+fi
+
+echo "Health checking $URL for version $EXPECTED_VERSION"
+echo "Max attempts: $MAX_ATTEMPTS, Delay: ${DELAY}s"
+
+for i in $(seq 1 $MAX_ATTEMPTS); do
+    echo -n "Attempt $i: "
+    
+    RESPONSE=$(curl -s -H "Host: sample-app.local" $URL 2>/dev/null)
+    
+    if echo "$RESPONSE" | grep -q "Version $EXPECTED_VERSION"; then
+        echo "SUCCESS - Found expected version $EXPECTED_VERSION"
+        exit 0
+    else
+        FOUND_VERSION=$(echo "$RESPONSE" | grep -o "Version [0-9.]*" || echo "No version found")
+        echo "WAITING - Found: $FOUND_VERSION, Expected: Version $EXPECTED_VERSION"
+    fi
+    
+    sleep $DELAY
+done
+
+echo "FAILED - Expected version not found after $MAX_ATTEMPTS attempts"
+exit 1
+EOF
+
+chmod +x health-check.sh
+
+# Test the monitoring scripts
+./monitor-deployment.sh sample-app-sample-app-chart
+./health-check.sh http://localhost/ "1.0" 5 1
+Subtask 2.10: Automated Rollback on Failure
+Create an automated rollback mechanism:
+
+# Create automated rollback script
+cat << 'EOF' > auto-rollback.sh
+#!/bin/bash
+
+RELEASE_NAME=$1
+CHART_PATH=$2
+NEW_VERSION=$3
+HEALTH_CHECK_URL=$4
+TIMEOUT=${5:-300}
+
+if [ -z "$RELEASE_NAME" ] || [ -z "$CHART_PATH" ] || [ -z "$NEW_VERSION" ] || [ -z "$HEALTH_CHECK_URL" ]; then
+    echo "Usage: $0 <release-name> <chart-path> <new-version> <health-check-url> [timeout]"
+    exit 1
+fi
+
+echo "Starting automated deployment with rollback capability"
+echo "Release: $RELEASE_NAME"
+echo "New Version: $NEW_VERSION"
+echo "Timeout: ${TIMEOUT}s"
+
+# Store current revision for rollback
+CURRENT_REVISION=$(helm history $RELEASE_NAME | tail -n 1 | awk '{print $1}')
+echo "Current revision: $CURRENT_REVISION"
+
+# Perform upgrade
+echo "Upgrading to version $NEW_VERSION..."
+helm upgrade $RELEASE_NAME $CHART_PATH --set image.tag=$NEW_VERSION
+
+# Wait for rollout to complete
+echo "Waiting for rollout to complete..."
+DEPLOYMENT_NAME=$(kubectl get deployments -l app.kubernetes.io/instance=$RELEASE_NAME -o jsonpath='{.items[0].metadata.name}')
+
+if ! kubectl rollout status deployment/$DEPLOYMENT_NAME --timeout=${TIMEOUT}s; then
+    echo "Rollout failed or timed out. Initiating rollback..."
+    helm rollback $RELEASE_NAME $CURRENT_REVISION
+    kubectl rollout status deployment/$DEPLOYMENT_NAME --timeout=120s
+    echo "Rollback completed"
+    exit 1
+fi
+
+# Perform health check
+echo "Performing health check..."
+if ./health-check.sh $HEALTH_CHECK_URL $NEW_VERSION 10 3; then
+    echo "Deployment successful and healthy"
+    exit 0
+else
+    echo "Health check failed. Initiating rollback..."
+    helm rollback $RELEASE_NAME $CURRENT_REVISION
+    kubectl rollout status deployment/$DEPLOYMENT_NAME --timeout=120s
+    echo "Rollback completed due to health check failure"
+    exit 1
+fi
+EOF
+
+chmod +x auto-rollback.sh
+
+# Test automated rollback with a failing deployment
+echo "Testing automated rollback with non-existent image..."
+./auto-rollback.sh sample-app ./sample-app-chart v999.0 http://localhost/
+
+# Test successful deployment
+echo "Testing successful deployment..."
+./auto-rollback.sh sample-app ./sample-app-chart v2.0 http://localhost/
+Verification and Testing
+Verify All Components
+# Check all deployments
+kubectl get deployments
+
+# Check all services
+kubectl get services
+
+# Check ingress
+kubectl get ingress
+
+# Check Helm releases
+helm list
+
+# Test application accessibility
+curl -H "Host: sample-app.local" http://localhost/
+
+# Check deployment history
+kubectl rollout history deployment/sample-app-sample-app-chart
+helm history sample-app
+Performance Testing
+# Create a simple load test script
+cat << 'EOF' > load-test.sh
+#!/bin/bash
+
+URL=${1:-http://localhost/}
+REQUESTS=${2:-100}
+CONCURRENT=${3:-10}
+
+echo "Load testing $URL with $REQUESTS requests, $CONCURRENT concurrent"
+
+for i in $(seq 1 $CONCURRENT); do
+    (
+        for j in $(seq 1 $((REQUESTS/CONCURRENT))); do
+            curl -s -H "Host: sample-app.local" $URL > /dev/null
+            echo -n "."
+        done
+    ) &
+done
+
+wait
+echo -e "\nLoad test completed"
+EOF
+
+chmod +x load-test.sh
+
+# Run load test
+./load-test.sh http://localhost/ 50 5
+Cleanup
+# Uninstall Helm releases
+helm uninstall sample-app
+helm uninstall sample-app-green 2>/dev/null || true
+
+# Delete kind cluster
+kind delete cluster --name=helm-lab
+
+# Remove host entry
+sudo sed -i '/sample-app.local/d' /etc/hosts
+
+# Clean up files
+rm -rf ~/helm-lab
+Troubleshooting Tips
+Common Issues and Solutions
+Issue 1: Pods stuck in Pending state
+
+# Check node resources
+kubectl describe nodes
+
+# Check pod events
+kubectl describe pod <pod-name>
+
+# Check resource requests
+kubectl get pods -o yaml | grep -A 5 resources
+Issue 2: Ingress not working
+
+# Check ingress controller
+kubectl get pods -n ingress-nginx
+
+# Check ingress configuration
+kubectl describe ingress
+
+# Verify service endpoints
+kubectl get endpoints
+Issue 3: Helm upgrade fails
+
+# Check Helm release status
+helm status <release-name>
+
+# View detailed error
+helm upgrade <release-name> <chart> --debug --dry-run
+
+# Force upgrade if needed
+helm upgrade <release-name> <chart> --force
+Issue 4: Rollback not working
+
+# Check rollout history
+kubectl rollout history deployment/<deployment-name>
+
+# Manual rollback to specific revision
+kubectl rollout undo deployment/<deployment-name> --to-revision=<revision-number>
+
+# Check rollback status
+kubectl rollout status deployment/<deployment-name>
+Conclusion
+In this comprehensive lab, you have successfully:
+
+Set up a complete Helm and Kubernetes environment on a single Linux machine using kind
+Created and deployed applications using Helm charts with proper configuration management
+Implemented rolling updates with zero-downtime deployment strategies
+Executed canary deployments to safely test new versions with limited traffic exposure
+Performed blue-green deployments for instant traffic switching between environments
+Developed rollback strategies for quick recovery from failed deployments
+Created monitoring and automation scripts for deployment health checks and automated rollbacks
+Learned progressive delivery patterns that are essential for modern application deployment
+These skills are crucial for DevOps engineers and platform administrators who need to manage application deployments in production Kubernetes environments. The techniques you've learned help ensure high availability, reduced risk, and faster recovery during application updates.
+
+The combination of Helm's package management capabilities with Kubernetes' orchestration features provides a powerful foundation for implementing enterprise-grade deployment strategies. You can now apply these patterns to real-world scenarios where application reliability and deployment safety are paramount.
